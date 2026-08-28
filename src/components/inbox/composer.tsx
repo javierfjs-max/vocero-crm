@@ -8,6 +8,7 @@ import {
   Paperclip,
   Send,
   UserRound,
+  Wand2,
   X,
 } from "lucide-react";
 import type { ConversationDto, TemplateDto } from "@/lib/types";
@@ -43,6 +44,11 @@ export function Composer({
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [polishing, setPolishing] = useState(false);
+  const [aiConfigured, setAiConfigured] = useState(false);
+  // Borrador previo al pulido: mientras exista, se ofrece deshacer. Se limpia
+  // en cuanto el operador vuelve a escribir o envía.
+  const [preDraft, setPreDraft] = useState<string | null>(null);
   const [templates, setTemplates] = useState<TemplateDto[]>([]);
   const [file, setFile] = useState<File | null>(null);
   const [filePreview, setFilePreview] = useState<string | null>(null);
@@ -61,6 +67,21 @@ export function Composer({
       .then((d: { templates?: TemplateDto[] }) => {
         if (!cancelled)
           setTemplates((d.templates ?? []).filter((t) => t.status === "approved"));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Sin proveedor de IA el botón de pulir no se dibuja: un botón que solo sabe
+  // fallar es peor que no tenerlo.
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/agent/profile")
+      .then((r) => (r.ok ? r.json() : { aiConfigured: false }))
+      .then((d: { aiConfigured?: boolean }) => {
+        if (!cancelled) setAiConfigured(Boolean(d.aiConfigured));
       })
       .catch(() => {});
     return () => {
@@ -97,6 +118,45 @@ export function Composer({
     return data?.message ?? `Error ${res.status}`;
   }
 
+  /**
+   * Pule el borrador. Si algo falla, el texto del operador se queda como
+   * estaba: perder lo que ya escribió es el único desenlace inaceptable.
+   */
+  async function polish() {
+    const draft = text.trim();
+    if (!draft || polishing) return;
+    setError(null);
+    setPolishing(true);
+    try {
+      const res = await fetch("/api/inbox/compose-assist", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ draft }),
+      });
+      const data = (await res.json().catch(() => null)) as
+        | { text?: string; message?: string }
+        | null;
+      if (!res.ok || !data?.text) {
+        setError(data?.message ?? `Error ${res.status}`);
+        return;
+      }
+      setPreDraft(text);
+      setText(data.text);
+      requestAnimationFrame(autogrow);
+    } catch {
+      setError("No se pudo pulir el borrador. Tu texto quedó intacto.");
+    } finally {
+      setPolishing(false);
+    }
+  }
+
+  function undoPolish() {
+    if (preDraft === null) return;
+    setText(preDraft);
+    setPreDraft(null);
+    requestAnimationFrame(autogrow);
+  }
+
   async function submit() {
     setError(null);
 
@@ -120,6 +180,7 @@ export function Composer({
       }
       pickFile(null);
       setText("");
+      setPreDraft(null);
       if (taRef.current) taRef.current.style.height = "auto";
       onSent();
       return;
@@ -132,6 +193,7 @@ export function Composer({
     // salía todo como un solo mensaje. El campo se limpia ya; la burbuja
     // "enviando" del hilo es la que informa el estado real.
     setText("");
+    setPreDraft(null);
     if (taRef.current) taRef.current.style.height = "auto";
     const err = await onSend(value);
     if (err) {
@@ -380,6 +442,22 @@ export function Composer({
           >
             <UserRound className="h-[18px] w-[18px]" strokeWidth={1.7} />
           </button>
+          {aiConfigured && (
+            <button
+              onClick={() => void polish()}
+              disabled={sending || polishing || !text.trim()}
+              aria-label="Pulir redacción"
+              title="Corrige ortografía y ajusta el tono. No agrega información."
+              className={cn(
+                "rounded p-1.5 text-text-3 transition-colors hover:bg-secondary hover:text-text-1",
+                polishing && "animate-pulse text-brand",
+                (sending || polishing || !text.trim()) &&
+                  "cursor-not-allowed opacity-40 hover:bg-transparent hover:text-text-3"
+              )}
+            >
+              <Wand2 className="h-[18px] w-[18px]" strokeWidth={1.7} />
+            </button>
+          )}
         </div>
         <textarea
           ref={taRef}
@@ -388,6 +466,7 @@ export function Composer({
           rows={1}
           onChange={(e) => {
             setText(e.target.value);
+            setPreDraft(null);
             autogrow();
           }}
           onKeyDown={(e) => {
@@ -411,7 +490,18 @@ export function Composer({
         </button>
       </div>
       <div className="mt-1.5 flex items-center justify-between">
-        {error ? <p className="text-xs text-destructive">{error}</p> : <span />}
+        {error ? (
+          <p className="text-xs text-destructive">{error}</p>
+        ) : preDraft !== null ? (
+          <button
+            onClick={undoPolish}
+            className="text-[11px] text-text-3 underline underline-offset-2 transition-colors hover:text-text-1"
+          >
+            Deshacer pulido
+          </button>
+        ) : (
+          <span />
+        )}
         <p className="text-[11px] text-text-3">
           Ventana abierta · quedan {formatRemaining(conversation.windowRemainingMs)}
         </p>

@@ -1,4 +1,5 @@
 import { JUDGE_MARKER } from "@/server/ai/prompts";
+import { POLISH_MARKER } from "@/server/inbox/compose-assist";
 
 /**
  * Proveedor LLM determinista para el self-test (contrato mocks.md).
@@ -41,6 +42,16 @@ export function aiMockCompletion(messages: InMessage[]): string {
       });
     }
     return JSON.stringify({ veredicto: "verde", hallazgos: [] });
+  }
+
+  // Pulido del borrador del operador: devuelve el MISMO contenido con la forma
+  // arreglada (mayúscula inicial y punto final). Que no invente nada es justo
+  // lo que el self-test verifica, así que el mock tampoco puede inventar.
+  if (system.includes(POLISH_MARKER)) {
+    const limpio = lastUser.trim();
+    const conMayuscula = limpio.charAt(0).toUpperCase() + limpio.slice(1);
+    const conPunto = /[.!?]$/.test(conMayuscula) ? conMayuscula : `${conMayuscula}.`;
+    return JSON.stringify({ text: conPunto });
   }
 
   const text = lastUser.toLowerCase();

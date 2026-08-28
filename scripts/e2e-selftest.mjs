@@ -976,9 +976,75 @@ async function main() {
   );
 
   await agendaChecks();
+  await pulirBorradorChecks(conv008.id);
 
   console.log(`\n===== ${checks - failures}/${checks} checks OK, ${failures} fallos =====`);
   process.exit(failures > 0 ? 1 : 0);
+}
+
+/* ============================================================
+ * Pulir borrador del operador (tests/e2e/us-pulir-borrador.md)
+ *
+ * Lo que importa no es que redacte bonito —eso lo decide el modelo— sino que
+ * NO invente y que jamás envíe. Un pulido que agrega un precio o que se cuela
+ * como mensaje al cliente es un fallo de producto, no de estilo.
+ * ============================================================ */
+
+async function pulirBorradorChecks(conversationId) {
+  console.log("\n== pulir el borrador del operador ==");
+
+  const borrador = "oye si tenemos stock, te lo mando el jueve";
+  const antes = (await api(`/api/conversations/${conversationId}/messages`)).json
+    ?.messages?.length;
+
+  const { res, json } = await api("/api/inbox/compose-assist", {
+    method: "POST",
+    body: JSON.stringify({ draft: borrador }),
+  });
+
+  ok("pulir: responde 200 con texto", res.status === 200 && !!json?.text,
+    `${res.status} ${JSON.stringify(json)}`);
+
+  const pulido = json?.text ?? "";
+  ok("pulir: devuelve algo distinto del borrador", pulido !== borrador, pulido);
+
+  // La garantía dura: no inventa datos. El borrador no menciona precio ni
+  // moneda, así que el pulido tampoco puede.
+  ok(
+    "pulir: NO inventa precios ni cifras que no estaban",
+    !/\$|\bpesos\b|\d+\s*(mxn|usd)/i.test(pulido),
+    pulido
+  );
+  ok(
+    "pulir: conserva el contenido del borrador (stock y jueves)",
+    /stock/i.test(pulido) && /jueve/i.test(pulido),
+    pulido
+  );
+
+  // La otra garantía dura: es una PROPUESTA. Nada se envió.
+  const despues = (await api(`/api/conversations/${conversationId}/messages`)).json
+    ?.messages?.length;
+  ok(
+    "pulir: no envía nada — el hilo no crece",
+    antes === despues,
+    `antes=${antes} despues=${despues}`
+  );
+
+  // Contrato de entrada: un borrador vacío se rechaza antes de gastar una
+  // llamada al proveedor.
+  const vacio = await api("/api/inbox/compose-assist", {
+    method: "POST",
+    body: JSON.stringify({ draft: "   " }),
+  });
+  ok("pulir: borrador vacío → 422", vacio.res.status === 422, `${vacio.res.status}`);
+
+  // Y sin sesión no se toca: es una superficie autenticada como cualquier otra.
+  const sinSesion = await fetch(`${BASE}/api/inbox/compose-assist`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: BASE },
+    body: JSON.stringify({ draft: borrador }),
+  });
+  ok("pulir: sin sesión → 401", sinSesion.status === 401, `${sinSesion.status}`);
 }
 
 /* ============================================================
