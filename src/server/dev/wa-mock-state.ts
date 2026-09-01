@@ -33,19 +33,38 @@ type WaMockState = {
   outbox: OutboxEntry[];
   templates: MockTemplate[];
   counter: number;
+  seal: string;
 };
 
 const globalForMock = globalThis as unknown as { __waMockState?: WaMockState };
 
+function newSeal(): string {
+  return Math.random().toString(36).slice(2, 8);
+}
+
 export function getWaMockState(): WaMockState {
   if (!globalForMock.__waMockState) {
-    globalForMock.__waMockState = { outbox: [], templates: [], counter: 0 };
+    globalForMock.__waMockState = {
+      outbox: [],
+      templates: [],
+      counter: 0,
+      seal: newSeal(),
+    };
+  }
+  // Estado creado por una versión del módulo sin sello (dev recarga módulos).
+  if (!globalForMock.__waMockState.seal) {
+    globalForMock.__waMockState.seal = newSeal();
   }
   return globalForMock.__waMockState;
 }
 
 export function resetWaMockState(): void {
-  globalForMock.__waMockState = { outbox: [], templates: [], counter: 0 };
+  globalForMock.__waMockState = {
+    outbox: [],
+    templates: [],
+    counter: 0,
+    seal: newSeal(),
+  };
 }
 
 export function nextN(): number {
@@ -53,13 +72,18 @@ export function nextN(): number {
 }
 
 /**
- * Sello único por arranque del proceso. Sin él, el contador del mock reinicia
- * al reiniciar `pnpm dev` y vuelve a emitir `wamid.mock.out.1`, que choca con
- * el UNIQUE de `wa_message_id` en la BD de una corrida anterior (500 al
- * enviar). No es un fallo del producto: la idempotencia hace su trabajo.
+ * El sello vive en el estado y se REGENERA en cada reset: si fuera constante
+ * de módulo, vaciar el outbox (reset del contador) o reiniciar `pnpm dev`
+ * re-emitiría un wamid ya usado, que choca con el UNIQUE de `wa_message_id`
+ * en la BD de una corrida anterior — 500 al enviar, y en entrantes el mensaje
+ * se dedupe y desaparece en silencio. No es un fallo del producto: la
+ * idempotencia hace su trabajo.
  */
-const boot = Math.random().toString(36).slice(2, 8);
+export function nextWamid(kind: "out" | "in" | "echo"): string {
+  const state = getWaMockState();
+  return `wamid.mock.${kind}.${state.seal}.${++state.counter}`;
+}
 
 export function nextOutboundWamid(): string {
-  return `wamid.mock.out.${boot}.${nextN()}`;
+  return nextWamid("out");
 }
