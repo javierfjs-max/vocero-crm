@@ -1,16 +1,13 @@
 import { after } from "next/server";
 import { getEnv } from "@/lib/env";
 import { isValidSignature, isValidWebhookToken } from "@/server/inbox/webhook";
-import {
-  isValidZernioSignature,
-  processMetaInstagramPayload,
-  processZernioEvent,
-  resolveZernioSecret,
-} from "@/server/instagram/ingest";
+import { processMetaInstagramPayload } from "@/server/instagram/ingest";
 import {
   channelDisabledResponse,
   isChannelEnabled,
 } from "@/server/channels/enabled";
+import { isValidZernioSignature, zernioSignatureFrom } from "@/server/zernio";
+import { processZernioPayload, resolveZernioSecret } from "@/server/zernio/dispatch";
 
 /**
  * 014 — Webhook público del canal de Instagram.
@@ -80,10 +77,7 @@ export async function POST(req: Request, { params }: Params) {
     // Zernio: la firma se valida contra el secreto de ESTA cuenta, que hay que
     // resolver leyendo el cuerpo primero.
     const { secret } = await resolveZernioSecret(rawBody);
-    const signature =
-      req.headers.get("x-zernio-signature") ??
-      req.headers.get("x-late-signature");
-    if (!isValidZernioSignature(rawBody, signature, secret)) {
+    if (!isValidZernioSignature(rawBody, zernioSignatureFrom(req.headers), secret)) {
       return new Response(null, { status: 401 });
     }
   }
@@ -92,10 +86,13 @@ export async function POST(req: Request, { params }: Params) {
   // fuera de la ruta.
   after(async () => {
     try {
+      // Un evento de Zernio se reparte por plataforma: esa API entrega TODAS
+      // las cuentas de la llave por un solo webhook, asi que esta URL tambien
+      // puede traer mensajes de la pagina de Facebook.
       if (isMeta) {
         await processMetaInstagramPayload(payload);
       } else {
-        await processZernioEvent(payload);
+        await processZernioPayload(payload);
       }
     } catch (err) {
       console.error("[ig] error procesando payload:", err);

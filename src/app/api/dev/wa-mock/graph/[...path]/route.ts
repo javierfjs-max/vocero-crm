@@ -15,6 +15,24 @@ export const dynamic = "force-dynamic";
 
 type Params = { params: Promise<{ path: string[] }> };
 
+/** 016 — Catálogo cerrado de Meta para `business_messaging` (mismo que el real). */
+const CAPI_EVENT_NAMES = new Set([
+  "Purchase",
+  "LeadSubmitted",
+  "QualifiedLead",
+  "InitiateCheckout",
+  "AddToCart",
+  "ViewContent",
+  "OrderCreated",
+  "OrderShipped",
+  "OrderDelivered",
+  "OrderCanceled",
+  "OrderReturned",
+  "CartAbandoned",
+  "RatingProvided",
+  "ReviewProvided",
+]);
+
 function bearerToken(req: Request): string {
   const h = req.headers.get("authorization") ?? "";
   return h.startsWith("Bearer ") ? h.slice(7) : "";
@@ -32,6 +50,11 @@ function invalidTokenResponse(): Response {
     },
     { status: 401 }
   );
+}
+
+/** Un teléfono de Meta es solo dígitos; un BSUID lleva prefijo y punto. */
+function esSoloDigitos(valor: string): boolean {
+  return /^[0-9]+$/.test(valor);
 }
 
 /** Quita el segmento de versión (v25.0/...) si viene en la ruta. */
@@ -72,6 +95,22 @@ export async function GET(req: Request, ctx: Params) {
     });
   }
 
+  // 017 — GET {psid}?fields=first_name,last_name → perfil de quien escribe
+  // por Messenger (la ingesta lo consulta la primera vez que ve un PSID).
+  const fields = new URL(req.url).searchParams.get("fields") ?? "";
+  if (path.length === 1 && fields.includes("first_name")) {
+    return Response.json({
+      id: path[0],
+      first_name: "Cliente",
+      last_name: "de Messenger",
+    });
+  }
+
+  // 017 — GET {pageId}?fields=id,name → validación de la página de Facebook
+  if (path.length === 1 && /(^|,)name(,|$)/.test(fields)) {
+    return Response.json({ id: path[0], name: "Página de prueba Vocero" });
+  }
+
   // GET {phoneNumberId}?fields=... → validación del wizard
   if (path.length === 1) {
     return Response.json({
@@ -108,6 +147,70 @@ export async function POST(req: Request, ctx: Params) {
 
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
 
+  // 016 — POST {datasetId}/events: Conversions API. Imita las tres cosas que
+  // de verdad importan del endpoint real: el catálogo cerrado de nombres, la
+  // exigencia del ctwa_clid, y —sobre todo— que Meta puede responder 200
+  // DESCARTANDO el evento. Los datasets terminados en "-fail" reproducen eso
+  // último, que es el modo de fallo que nadie ve venir.
+  if (path.length === 2 && path[1] === "events") {
+    const state = getWaMockState();
+    const events = Array.isArray(body.data)
+      ? (body.data as Record<string, unknown>[])
+      : [];
+    const event = events[0];
+    const eventName = String(event?.event_name ?? "");
+    const userData = (event?.user_data ?? {}) as Record<string, unknown>;
+    const ctwaClid = userData.ctwa_clid ? String(userData.ctwa_clid) : null;
+
+    if (!CAPI_EVENT_NAMES.has(eventName)) {
+      return Response.json(
+        {
+          error: {
+            message: `(#100) Invalid parameter: event_name ${eventName || "(vacío)"}`,
+            type: "GraphMethodException",
+            code: 100,
+            fbtrace_id: "mock-capi-badname",
+          },
+        },
+        { status: 400 }
+      );
+    }
+    if (!ctwaClid) {
+      return Response.json(
+        {
+          error: {
+            message: "Messaging Event Invalid Ctwa Clid",
+            type: "GraphMethodException",
+            code: 100,
+            error_subcode: 2804087,
+            fbtrace_id: "mock-capi-noclid",
+          },
+        },
+        { status: 400 }
+      );
+    }
+
+    const datasetId = path[0]!;
+    state.capiEvents.push({
+      n: nextN(),
+      datasetId,
+      eventName,
+      ctwaClid,
+      customData:
+        (event?.custom_data as Record<string, unknown> | undefined) ?? null,
+      body,
+      at: new Date().toISOString(),
+    });
+
+    // El 200 mentiroso: recibido por HTTP, descartado por Meta.
+    const received = datasetId.endsWith("-fail") ? 0 : 1;
+    return Response.json({
+      events_received: received,
+      messages: [],
+      fbtrace_id: `mock-capi-${state.capiEvents.length}`,
+    });
+  }
+
   // POST {phoneNumberId}/messages con status:"read" → typing/leído:
   // NO es un mensaje saliente — no contamina el outbox.
   if (path.length === 2 && path[1] === "messages" && body.status === "read") {
@@ -117,6 +220,29 @@ export async function POST(req: Request, ctx: Params) {
   // POST {phoneNumberId}/messages → registra en el outbox
   if (path.length === 2 && path[1] === "messages") {
     const state = getWaMockState();
+
+    /**
+     * Meta espera un TELEFONO en `to`. Un BSUID ahi devuelve 131026 — «el
+     * destinatario no puede recibir mensajes» — y el mock lo replica.
+     *
+     * Sin esto, mandar el BSUID en el campo equivocado pasaba en verde aqui y
+     * fallaba en produccion, que es exactamente lo que ocurrio. El BSUID va
+     * en `recipient`, con `recipient_type: "individual"`.
+     */
+    const destino = body.to as string | undefined;
+    if (destino && !esSoloDigitos(destino)) {
+      return Response.json(
+        {
+          error: {
+            message:
+              "(#131026) Message undeliverable: recipient is not a valid WhatsApp user",
+            code: 131026,
+            type: "OAuthException",
+          },
+        },
+        { status: 400 }
+      );
+    }
     // Meta responde 132000 si los parámetros no cuadran con las {{n}} de la
     // plantilla aprobada. El mock lo replica para que un desfase no pase.
     if (body.type === "template") {
@@ -158,6 +284,9 @@ export async function POST(req: Request, ctx: Params) {
       waMessageId,
       phoneNumberId: path[0]!,
       to: String(body.to ?? ""),
+      // Se guarda aparte para que un self-test pueda comprobar EN QUE CAMPO
+      // viajo el destinatario, que es de lo que dependia el fallo.
+      ...(body.recipient ? { recipient: String(body.recipient) } : {}),
       type: String(body.type ?? "text"),
       body,
       at: new Date().toISOString(),

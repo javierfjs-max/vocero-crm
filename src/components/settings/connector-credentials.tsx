@@ -172,7 +172,7 @@ export function ConnectorCredentials({
         </ul>
 
         {connection?.status === "error" && (
-          <p className="rounded-sm border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <p className="rounded-sm border border-danger-soft bg-danger-tint px-3 py-2 text-sm text-danger-text">
             {meta.label} rechazó las últimas credenciales. Las citas se siguen
             agendando, pero sin enlace hasta que vuelvas a conectar.
           </p>

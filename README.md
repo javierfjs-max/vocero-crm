@@ -123,6 +123,25 @@ tu conector en tu fork siguiendo
 cae, la cita **se agenda igual** con el enlace pendiente de reintentar: un
 tercero caído no te cuesta la conversión.
 
+### 📈 Conversiones de anuncios (opcional, apagada por defecto)
+
+Si anuncias con **Click-to-WhatsApp**, Meta sabe qué conversaciones empezaron
+desde un anuncio, pero no cuáles sirvieron: sin nadie que se lo diga, optimiza
+hacia el público más barato de hacer escribir, que rara vez es el que compra.
+
+Enciéndela con `ATRIBUCION=on`, pega tu dataset en Ajustes → Anuncios (el token
+lo reusa de tu conexión de WhatsApp) y di qué etapa de TU pipeline significa
+"lead calificado". A partir de ahí el CRM le reporta a Meta el lead calificado y
+la venta cerrada —con su importe— por la **Conversions API**, y una tabla de
+actividad te dice qué se envió, con qué acuse y, cuando no salió, por qué.
+
+No se le pide nada al usuario que el CRM ya sepa: la venta cuelga de la etapa
+ganada que ya tienes, y todo se dispara desde la misma puerta que mueve leads,
+así que reporta igual si arrastras la tarjeta tú, el agente incluido o tu propio
+bot. Si Meta se cae, el lead se mueve igual: una conversión jamás vale un
+movimiento bloqueado. Los gotchas de Meta que cuesta descubrir solo están en
+[`docs/atribucion-capi.md`](docs/atribucion-capi.md).
+
 ### 📄 Plantillas · 👥 Multi-usuario · 🔐 Self-hosted
 
 Plantillas con varias variables `{{1}}…{{n}}` y aprobación de Meta
@@ -256,6 +275,68 @@ del cliente se conecta con el **override de callback por WABA**:
 > la app dueña. Por eso Vocero también **sincroniza plantillas por la API de
 > Graph** (botón "Sincronizar" en Configuración → Plantillas), así el modo
 > agencia ve las aprobaciones igual.
+
+## Canales opcionales: Instagram y Messenger
+
+WhatsApp es el canal por el que existe Vocero y siempre está encendido. Los
+demás viajan en el mismo código, **apagados por defecto** ([ADR-001](docs/adr-001-canales-opcionales.md)):
+una instancia que no los usa no ve pantallas, webhooks ni variables suyas.
+Se encienden con una variable de despliegue:
+
+```bash
+CHANNELS=whatsapp,instagram,messenger   # los que quieras; whatsapp siempre va
+```
+
+Con más de un canal encendido, la Bandeja enseña el distintivo de cada
+conversación y permite filtrar por canal. El contacto, el pipeline, la ficha
+y el agente son los mismos: un lead es un lead, escriba por donde escriba.
+
+### Messenger (página de Facebook)
+
+Dos formas de traer los mensajes; se elige en **Configuración → Messenger**.
+
+**Con Zernio** (API unificada, la misma que puede servir Instagram):
+
+1. Vincula la página de Facebook en el panel de [Zernio](https://zernio.com) y
+   copia el `accountId` de esa cuenta. Crea una API key (Settings → API Keys;
+   se muestra una sola vez).
+2. En Vocero, **Configuración → Messenger**: elige *Zernio*, pega el
+   `accountId`, la API key y —recomendado— un secreto de webhook. Pulsa
+   *Probar y guardar*: la llave se valida contra Zernio antes de guardarse
+   cifrada, y la pantalla te enseña la URL de callback.
+3. En Zernio, da de alta ese endpoint con el evento `message.received` y el
+   mismo secreto. El webhook de Zernio entrega todas tus plataformas por la
+   misma URL; Vocero solo ingiere aquí lo de Facebook.
+
+**Con una app propia de Meta**:
+
+1. En [developers.facebook.com](https://developers.facebook.com) crea (o usa)
+   una app con el producto **Messenger** y genera el **token de acceso de la
+   página** con el permiso `pages_messaging`. Anota el **ID de la página**.
+2. En Vocero, **Configuración → Messenger**: elige *App propia de Meta*, pega
+   el ID y el token y pulsa *Probar y guardar*.
+3. En la app de Meta, **Messenger → Webhooks**: objeto `page`, campo
+   `messages`, esa URL de callback y el token de verificación que enseña la
+   pantalla. Suscribe la página a la app.
+
+Desde ese momento, lo que la gente le escribe a la página entra a la bandeja
+como `Messenger`, con el nombre de su perfil, y lo que respondas desde Vocero
+(tú o el agente) llega a su chat. Fuera de la ventana de 24 h la respuesta sale
+con la etiqueta `HUMAN_AGENT` de Meta (hasta 7 días); no hay plantillas.
+Hoy el canal es de texto: los adjuntos que te manden se ven como
+«📎 Imagen» para que sepas que llegaron, y los adjuntos salientes no están.
+
+Con app propia y sin App Review, la página solo recibe mensajes de cuentas con
+un rol en la app; para atender al público hay que aprobar `pages_messaging`.
+Por Zernio ese trámite ya está resuelto del lado de ellos.
+
+### Instagram (DMs del perfil profesional)
+
+Mismo modelo, con dos fuentes posibles: una app propia de Meta (perfil del
+negocio como tester) o [Zernio](https://zernio.com) como API unificada. La
+conexión se guarda por la API de ajustes (`PUT /api/settings/instagram`) y el
+webhook vive en `/api/webhooks/ig/<token>`. El detalle está en
+[`specs/014-canal-instagram`](specs/014-canal-instagram/spec.md).
 
 ## Configuración de la IA
 

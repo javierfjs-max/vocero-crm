@@ -25,6 +25,10 @@ const prefixes = {
   offeredSlot: "ofs",
   zoomCredentials: "zcred",
   googleCredentials: "gcred",
+  // 016 — atribución de anuncios
+  adAttribution: "att",
+  conversionEvent: "cve",
+  capiSettings: "capi",
 } as const;
 
 export type IdKind = keyof typeof prefixes;

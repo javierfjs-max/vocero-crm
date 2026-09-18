@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { getEnv } from "@/lib/env";
 import {
   ConnectorError,
@@ -34,8 +35,25 @@ export const ZOOM_SCOPES = [
   "user:read:user",
 ] as const;
 
+/**
+ * La clave del caché incluye TODO lo que determina el token.
+ *
+ * Misma trampa que la de Google (#50, punto 3), que aquí nadie ha reportado
+ * todavía porque el conector se usa menos: era `accountId:clientId`, así que
+ * cambiar el SECRETO no tenía efecto observable hasta que el token expiraba y
+ * el operador concluía que las credenciales nuevas también estaban mal.
+ *
+ * Se arregla junto con la otra a propósito: dejar una de las dos copias de un
+ * mismo error es cómo vuelve.
+ */
+function claveDeToken(creds: ZoomCreds): string {
+  return createHash("sha256")
+    .update(JSON.stringify([creds.accountId, creds.clientId, creds.clientSecret]))
+    .digest("hex");
+}
+
 async function getAccessToken(creds: ZoomCreds): Promise<string> {
-  const key = `${creds.accountId}:${creds.clientId}`;
+  const key = claveDeToken(creds);
   const cached = getCachedZoomToken(key);
   if (cached) return cached;
 

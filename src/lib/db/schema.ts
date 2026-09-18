@@ -120,7 +120,7 @@ export const contact = pgTable(
      * 014: canal por el que vive este contacto. Aditivo y con default: toda
      * fila existente sigue significando exactamente lo mismo.
      */
-    channel: text("channel", { enum: ["whatsapp", "instagram"] })
+    channel: text("channel", { enum: ["whatsapp", "instagram", "messenger"] })
       .notNull()
       .default("whatsapp"),
     /**
@@ -136,6 +136,20 @@ export const contact = pgTable(
     /** Business-Scoped User ID si se conoce (003). */
     waUserId: text("wa_user_id"),
     name: text("name").notNull(),
+    /**
+     * Quién puso este nombre.
+     *
+     * `perfil` = lo trajo WhatsApp y puede seguir actualizandose solo;
+     * `manual` = lo escribio una persona en el CRM y NADIE lo pisa.
+     *
+     * Existe porque las dos cosas se necesitan a la vez: un contacto que
+     * cambia su nombre de WhatsApp tiene que reflejarse (#51), y el operador
+     * que renombro a alguien como "Juan - obra Polanco" no puede perder ese
+     * trabajo con el siguiente mensaje.
+     */
+    nameSource: text("name_source", { enum: ["perfil", "manual"] })
+      .notNull()
+      .default("perfil"),
     notes: text("notes"),
     /**
      * Ficha de calificación que levanta un cerebro externo por
@@ -330,7 +344,7 @@ export const conversation = pgTable(
      * 014: canal de la conversacion. Denormalizado del contacto a proposito:
      * el ruteo de salida y el filtro de la bandeja lo leen en cada mensaje.
      */
-    channel: text("channel", { enum: ["whatsapp", "instagram"] })
+    channel: text("channel", { enum: ["whatsapp", "instagram", "messenger"] })
       .notNull()
       .default("whatsapp"),
     /**
@@ -528,6 +542,50 @@ export const instagramCredentials = pgTable(
     uniqueIndex("instagram_credentials_org_uq").on(t.organizationId),
     uniqueIndex("instagram_credentials_ig_user_uq").on(t.igUserId),
     index("instagram_credentials_account_ref_idx").on(t.accountRef),
+  ]
+);
+
+/**
+ * 017 — Credenciales del canal de Messenger: la página de Facebook y su token
+ * de acceso, cifrado con el mismo AES-256-GCM que los demás. Tabla propia y
+ * explícita, como la de Instagram: unas credenciales tienen forma fija y
+ * conocida, y esconderlas en un jsonb perdería el tipado y los índices.
+ */
+export const messengerCredentials = pgTable(
+  "messenger_credentials",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    /** De donde vienen los mensajes: API unificada o app propia de Meta. */
+    source: text("source", { enum: ["zernio", "meta"] })
+      .notNull()
+      .default("meta"),
+    /**
+     * ID de la página de Facebook: por él enruta el webhook de Meta
+     * (`entry[].id`). En modo Zernio puede no conocerse — ahí enruta
+     * `account_ref` — así que es opcional.
+     */
+    pageId: text("page_id"),
+    pageName: text("page_name"),
+    /** Zernio: accountId de la cuenta conectada. Meta directo: null. */
+    accountRef: text("account_ref"),
+    tokenCipher: text("token_cipher").notNull(),
+    tokenIv: text("token_iv").notNull(),
+    tokenTag: text("token_tag").notNull(),
+    /** Secreto HMAC de las entregas (Zernio); null en modo Meta. */
+    webhookSecret: text("webhook_secret"),
+    status: text("status", { enum: ["connected", "reconnect_required"] })
+      .notNull()
+      .default("connected"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("messenger_credentials_org_uq").on(t.organizationId),
+    uniqueIndex("messenger_credentials_page_uq").on(t.pageId),
+    index("messenger_credentials_account_ref_idx").on(t.accountRef),
   ]
 );
 
@@ -843,4 +901,136 @@ export const agentTestCase = pgTable(
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (t) => [index("test_case_run_idx").on(t.runId)]
+);
+
+/* ============================================================
+ * 016 — Atribución de anuncios y Conversions API
+ * (detrás de la bandera ATRIBUCION)
+ * ============================================================ */
+
+/**
+ * De qué anuncio vino una conversación. El primer referral gana: el UNIQUE de
+ * abajo es lo que vuelve idempotente la captura ante los reintentos de Meta,
+ * en vez de un "consulta y luego inserta" que dos webhooks simultáneos
+ * ganarían los dos.
+ */
+export const adAttribution = pgTable(
+  "ad_attribution",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    contactId: text("contact_id")
+      .notNull()
+      .references(() => contact.id, { onDelete: "cascade" }),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversation.id, { onDelete: "cascade" }),
+    /**
+     * El identificador del clic en el anuncio. Es la llave de TODO: sin él no
+     * hay nada que reportarle a Meta. Nullable porque hay referrals sin clid.
+     */
+    ctwaClid: text("ctwa_clid"),
+    sourceId: text("source_id"),
+    sourceType: text("source_type"),
+    sourceUrl: text("source_url"),
+    headline: text("headline"),
+    body: text("body"),
+    mediaType: text("media_type"),
+    /**
+     * Payload íntegro del referral. Es la póliza contra "Meta agregó un campo":
+     * nada se pierde y un fork puede pintar el creativo sin migrar nada.
+     */
+    raw: jsonb("raw").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("ad_attribution_org_conversation_uq").on(
+      t.organizationId,
+      t.conversationId
+    ),
+    index("ad_attribution_org_contact_idx").on(t.organizationId, t.contactId),
+  ]
+);
+
+/**
+ * Cada intento de reportarle un desenlace a Meta. Las filas `skipped` no son
+ * basura: son la respuesta a "¿por qué este lead no aparece en Meta?", que sin
+ * ellas se contesta adivinando.
+ */
+export const conversionEvent = pgTable(
+  "conversion_event",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversation.id, { onDelete: "cascade" }),
+    attributionId: text("attribution_id").references(() => adAttribution.id, {
+      onDelete: "set null",
+    }),
+    /** Nombre del catálogo de Meta tal cual (`QualifiedLead`, `Purchase`). */
+    eventName: text("event_name").notNull(),
+    status: text("status", { enum: ["pending", "sent", "failed", "skipped"] })
+      .notNull()
+      .default("pending"),
+    /** Motivo legible: por qué se omitió, o qué contestó Meta. */
+    error: text("error"),
+    /**
+     * Acuse del envío. Es la única referencia que Meta pide para rastrear un
+     * evento de su lado; sin persistirla, un `sent` no se puede reclamar.
+     */
+    fbTraceId: text("fb_trace_id"),
+    sentAt: timestamp("sent_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    // El dedup ES este índice: la fila se inserta ANTES de hablar con Meta y
+    // con ON CONFLICT DO NOTHING. Dos movimientos simultáneos del mismo lead
+    // no pueden mandar dos compras.
+    uniqueIndex("conversion_event_org_conv_name_uq").on(
+      t.organizationId,
+      t.conversationId,
+      t.eventName
+    ),
+    index("conversion_event_org_created_idx").on(
+      t.organizationId,
+      t.createdAt
+    ),
+  ]
+);
+
+/** Conexión del negocio con su dataset de Meta (token cifrado en reposo). */
+export const capiSettings = pgTable(
+  "capi_settings",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    datasetId: text("dataset_id").notNull(),
+    tokenCipher: text("token_cipher").notNull(),
+    tokenIv: text("token_iv").notNull(),
+    tokenTag: text("token_tag").notNull(),
+    /**
+     * Qué etapa significa "lead calificado" PARA ESTE NEGOCIO. Las etapas
+     * sembradas de Vocero no incluyen ninguna con ese nombre y cada quien
+     * renombra las suyas, así que se elige en vez de adivinarse. NULL = ese
+     * evento no se emite. `set null` a propósito: borrar la etapa apaga el
+     * evento, no rompe la configuración.
+     */
+    qualifiedStageId: text("qualified_stage_id").references(
+      () => pipelineStage.id,
+      { onDelete: "set null" }
+    ),
+    status: text("status", { enum: ["connected", "error"] })
+      .notNull()
+      .default("connected"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("capi_settings_org_uq").on(t.organizationId)]
 );

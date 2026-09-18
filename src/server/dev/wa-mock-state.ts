@@ -8,6 +8,13 @@ export type OutboxEntry = {
   n: number;
   phoneNumberId: string;
   to: string;
+  /**
+   * El BSUID, cuando el destinatario iba por `recipient` en vez de `to`.
+   *
+   * Se expone para que un self-test pueda comprobar EN QUE CAMPO viajo: es la
+   * unica diferencia entre el envio que Meta acepta y el que devuelve 131026.
+   */
+  recipient?: string;
   type: string;
   body: unknown;
   at: string;
@@ -29,9 +36,26 @@ export type MockTemplate = {
   components?: unknown[];
 };
 
+/**
+ * 016 — Un evento de Conversions API que el CRM le mandó al mock. El self-test
+ * lo inspecciona para verificar la FORMA del payload: el modo de fallar de ese
+ * endpoint es un 200 con `events_received: 0`, donde un campo mal puesto se ve
+ * idéntico a uno bien puesto.
+ */
+export type CapiMockEvent = {
+  n: number;
+  datasetId: string;
+  eventName: string;
+  ctwaClid: string | null;
+  customData: Record<string, unknown> | null;
+  body: unknown;
+  at: string;
+};
+
 type WaMockState = {
   outbox: OutboxEntry[];
   templates: MockTemplate[];
+  capiEvents: CapiMockEvent[];
   counter: number;
   seal: string;
 };
@@ -47,6 +71,7 @@ export function getWaMockState(): WaMockState {
     globalForMock.__waMockState = {
       outbox: [],
       templates: [],
+      capiEvents: [],
       counter: 0,
       seal: newSeal(),
     };
@@ -62,6 +87,7 @@ export function resetWaMockState(): void {
   globalForMock.__waMockState = {
     outbox: [],
     templates: [],
+    capiEvents: [],
     counter: 0,
     seal: newSeal(),
   };

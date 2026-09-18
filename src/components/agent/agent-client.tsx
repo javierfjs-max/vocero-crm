@@ -73,7 +73,7 @@ export function AgentClient() {
   return (
     <div className="h-full overflow-y-auto">
       <header className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-3 sm:px-6 sm:py-4">
-        <h2 className="font-semibold">Agente de IA</h2>
+        <h2 className="text-[17px] font-bold tracking-tight">Agente de IA</h2>
         <div className="flex items-center gap-3">
           {saved && <span className="text-xs text-primary">Guardado ✓</span>}
           <span className="text-sm text-muted-foreground">
@@ -86,11 +86,18 @@ export function AgentClient() {
             disabled={!aiConfigured}
             onClick={() => void saveProfile({ enabled: !profile.enabled })}
             className={`relative h-6 w-11 rounded-full transition-colors disabled:opacity-40 ${
-              profile.enabled ? "bg-primary" : "bg-secondary"
+              profile.enabled ? "bg-brand" : "bg-border-strong"
             }`}
           >
+            {/*
+              `shadow-sm` no es adorno: el pomo es blanco (`--knob`) y sobre el
+              fondo encendido se perdía, así que el interruptor parecía una
+              pastilla sólida sin control (#53). El de la bandeja ya la
+              llevaba; este era el único del producto sin ella. Mismos tokens
+              que allí, para que no vuelvan a divergir.
+            */}
             <span
-              className={`absolute top-0.5 h-5 w-5 rounded-full bg-knob transition-transform ${
+              className={`absolute top-0.5 h-5 w-5 rounded-full bg-knob shadow-sm transition-transform ${
                 profile.enabled ? "translate-x-5" : "translate-x-0.5"
               }`}
             />

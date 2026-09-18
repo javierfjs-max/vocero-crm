@@ -1,5 +1,6 @@
 import { JUDGE_MARKER } from "@/server/ai/prompts";
 import { POLISH_MARKER } from "@/server/inbox/compose-assist";
+import { CABECERA_HUECOS } from "@/server/agenda/offers";
 
 /**
  * Proveedor LLM determinista para el self-test (contrato mocks.md).
@@ -55,6 +56,37 @@ export function aiMockCompletion(messages: InMessage[]): string {
   }
 
   const text = lastUser.toLowerCase();
+
+  /**
+   * 015 — La agenda, ejercitando el camino REAL.
+   *
+   * El mock reserva copiando el `startUtc` del mapa de huecos, igual que tiene
+   * que hacer un modelo de verdad. Si ese mapa deja de llegar, aquí no hay de
+   * dónde sacar el instante y la reserva falla — que es exactamente el fallo
+   * que se vivió en producción (#50), en vez de un test que lo simula.
+   *
+   * Se buscan TODOS los mensajes `system`, no solo el primero: el mapa va al
+   * final, después del historial.
+   */
+  const huecos = messages
+    .filter((m) => m.role === "system" && m.content.includes(CABECERA_HUECOS))
+    .flatMap((m) => m.content.match(/\d{4}-\d{2}-\d{2}T[\d:.]+Z/g) ?? []);
+
+  const quiereCita = /cita|agendar|agenda|horario|reserv/.test(text);
+  if (quiereCita && huecos.length === 0) {
+    return JSON.stringify({
+      action: "offer_slots",
+      reply: "Claro, tengo estos horarios:",
+    });
+  }
+  const eligeUno = /primero|segundo|ese|esa|confirmo|quiero|me sirve/.test(text);
+  if (huecos.length > 0 && eligeUno) {
+    return JSON.stringify({
+      action: "book_slot",
+      startUtc: huecos[0],
+      reply: "¡Listo! Te agendé.",
+    });
+  }
 
   // Persona pide_humano (el regex de respaldo captura la frase canónica; esta
   // rama cubre variantes que llegan al modelo).

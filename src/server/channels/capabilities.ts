@@ -61,6 +61,18 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ChannelCapabilities> = {
     outboundMedia: false,
     deliveryReceipts: false,
   },
+  // 017: Messenger comparte la plataforma de mensajería de Meta con Instagram
+  // (misma ventana de 24 h, misma etiqueta HUMAN_AGENT fuera de ella, sin
+  // plantillas), pero admite textos más largos: 2000 caracteres. Se declara
+  // en bytes para no ser más generoso que la plataforma con acentos y emojis.
+  messenger: {
+    label: CHANNEL_LABEL.messenger,
+    windowMs: DAY_MS,
+    outsideWindow: "human_agent_tag",
+    maxTextBytes: 2000,
+    outboundMedia: false,
+    deliveryReceipts: false,
+  },
 };
 
 export function capabilitiesFor(channel: Channel): ChannelCapabilities {
