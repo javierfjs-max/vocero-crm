@@ -26,13 +26,18 @@ const envSchema = z.object({
   OPENROUTER_BASE_URL: z.string().url().default("https://openrouter.ai/api"),
   OPENROUTER_MODEL: z.string().optional(),
   OPENROUTER_JUDGE_MODEL: z.string().optional(),
-  // 014: canales encendidos, separados por coma. WhatsApp siempre esta on.
-  // Ej.: CHANNELS=whatsapp,instagram. Sin ella, la instancia es solo WhatsApp
-  // y las superficies de los demas canales responden 404.
+  // 014/017: canales encendidos, separados por coma. WhatsApp siempre esta on.
+  // Ej.: CHANNELS=whatsapp,instagram,messenger. Sin ella, la instancia es solo
+  // WhatsApp y las superficies de los demas canales responden 404.
   CHANNELS: z.string().optional(),
   // 015: motor de agenda. Apagado por defecto — sin el, toda la superficie de
   // agenda responde 404 y la UI no la menciona. Ej.: AGENDA=on
   AGENDA: z.string().optional(),
+  // 016: atribucion de anuncios y reporte a la Conversions API de Meta.
+  // Apagada por defecto: sin ella no se captura de que anuncio vino una
+  // conversacion, no se le reporta nada a Meta y la superficie da 404.
+  // Ej.: ATRIBUCION=on
+  ATRIBUCION: z.string().optional(),
   // 015: bases de los conectores. Solo se sobreescriben para apuntar a los
   // mocks en el self-test; en producción se usan las reales.
   ZOOM_BASE_URL: z.string().url().default("https://api.zoom.us/v2"),

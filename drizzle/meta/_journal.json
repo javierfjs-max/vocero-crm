@@ -71,6 +71,34 @@
       "when": 1787796724315,
       "tag": "0009_motor_agenda",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1787960052077,
+      "tag": "0010_atribucion_capi",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1788309200954,
+      "tag": "0011_canal_messenger",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1788310823966,
+      "tag": "0012_messenger_zernio",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1788731118597,
+      "tag": "0013_nombre_del_contacto",
+      "breakpoints": true
     }
   ]
 }

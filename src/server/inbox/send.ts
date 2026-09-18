@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
 import { newId } from "@/lib/db/ids";
 import { graphRequest, MetaApiError, normalizeRecipient } from "@/lib/meta/client";
+import { destinatarioMeta, type Destinatario } from "@/lib/meta/destinatario";
 import { publish } from "@/server/events/bus";
 import {
   getCredentialsByOrg,
@@ -16,6 +17,13 @@ import {
   type InstagramCredentials,
 } from "@/server/instagram/credentials";
 import { sendInstagramText } from "@/server/instagram/send";
+import { FB_PREFIX } from "@/server/inbox/identity";
+import {
+  getMessengerCredentialsByOrg,
+  markMessengerReconnectRequired,
+  type MessengerCredentials,
+} from "@/server/messenger/credentials";
+import { sendMessengerText } from "@/server/messenger/send";
 import {
   capabilitiesFor,
   textFits,
@@ -55,9 +63,14 @@ type SendTarget = {
   conversation: typeof schema.conversation.$inferSelect;
   /** null cuando el destino no es WhatsApp (014). */
   credentials: Credentials | null;
+  /** El destinatario en la forma que Meta espera: `to` o `recipient`. */
+  destinatario: Destinatario;
+  /** El identificador a secas, para lo que no arma un payload de Graph. */
   recipient: string;
   /** 014: presente solo en conversaciones de Instagram. */
   instagram?: InstagramCredentials;
+  /** 017: presente solo en conversaciones de Messenger. */
+  messenger?: MessengerCredentials;
 };
 
 /**
@@ -125,8 +138,46 @@ async function prepareSend(
     return {
       conversation: row.conversation,
       credentials: null,
+      // Instagram no pasa por la Graph API de WhatsApp; el campo existe para
+      // cumplir el tipo y su camino de envío no lo mira.
+      destinatario: { to: igRecipient },
       recipient: igRecipient,
       instagram: igCreds,
+    };
+  }
+
+  // 017: Messenger, mismo trato que Instagram: transporte propio, ventana
+  // propia (con etiqueta fuera de ella) y sin plantillas.
+  if (row.conversation.channel === "messenger") {
+    if (!isChannelEnabled("messenger")) {
+      throw new SendError(
+        "not_connected",
+        "El canal de Messenger está desactivado en esta instancia"
+      );
+    }
+    const fbCreds = await getMessengerCredentialsByOrg(organizationId);
+    if (!fbCreds) {
+      throw new SendError(
+        "not_connected",
+        "No hay página de Facebook conectada"
+      );
+    }
+    if (fbCreds.status === "reconnect_required") {
+      throw new SendError(
+        "reconnect_required",
+        "El token de la página expiró: reconecta Messenger en Configuración"
+      );
+    }
+    const fbRecipient = row.contact.waIdentity.startsWith(FB_PREFIX)
+      ? row.contact.waIdentity.slice(FB_PREFIX.length)
+      : row.contact.waIdentity;
+    return {
+      conversation: row.conversation,
+      credentials: null,
+      // Messenger tampoco pasa por la Graph API de WhatsApp.
+      destinatario: { to: fbRecipient },
+      recipient: fbRecipient,
+      messenger: fbCreds,
     };
   }
 
@@ -156,19 +207,31 @@ async function prepareSend(
     );
   }
 
-  // 003: el destinatario es el teléfono normalizado o, si el contacto llegó
-  // por BSUID sin teléfono, su Business-Scoped User ID.
-  const recipient = row.contact.phone
-    ? normalizeRecipient(row.contact.phone)
-    : row.contact.waUserId;
-  if (!recipient) {
+  /**
+   * 003 — El destinatario, en el campo que Meta espera para cada forma.
+   *
+   * Un teléfono va en `to`; un BSUID va en `recipient` con
+   * `recipient_type: "individual"`. Se mandaba el BSUID en `to` y Meta
+   * respondía 131026, que en la bandeja se lee como si el número del cliente
+   * no existiera.
+   */
+  const destinatario = destinatarioMeta(
+    row.contact.phone ? normalizeRecipient(row.contact.phone) : null,
+    row.contact.waUserId
+  );
+  const recipient = destinatario
+    ? "to" in destinatario
+      ? destinatario.to
+      : destinatario.recipient
+    : null;
+  if (!destinatario || !recipient) {
     throw new SendError(
       "meta_error",
       "El contacto no tiene teléfono ni identidad de WhatsApp utilizable"
     );
   }
 
-  return { conversation: row.conversation, credentials, recipient };
+  return { conversation: row.conversation, credentials, destinatario, recipient };
 }
 
 async function persistOutbound(input: {
@@ -235,16 +298,18 @@ export async function sendText(input: {
   aiGenerated?: boolean;
 }): Promise<SendResult> {
   const target = await prepareSend(input.conversationId, input.organizationId);
-  const { credentials, recipient } = target;
+  const { credentials } = target;
 
   const waMessageId = target.instagram
     ? await callInstagramSend(target, input.text)
-    : await callGraphSend(credentials!, {
-        messaging_product: "whatsapp",
-        to: recipient,
-        type: "text",
-        text: { body: input.text },
-      });
+    : target.messenger
+      ? await callMessengerSend(target, input.text)
+      : await callGraphSend(credentials!, {
+          messaging_product: "whatsapp",
+          ...target.destinatario,
+          type: "text",
+          text: { body: input.text },
+        });
 
   const messageId = await persistOutbound({
     organizationId: input.organizationId,
@@ -281,7 +346,7 @@ export async function sendMediaMessage(input: {
   const kind = validateOutgoing(input.file.mimeType, input.file.data.byteLength);
 
   const target = await prepareSend(input.conversationId, input.organizationId);
-  const { credentials, recipient } = target;
+  const { credentials } = target;
   const sendCaps = capabilitiesFor(target.conversation.channel);
   if (!sendCaps.outboundMedia) {
     throw new SendError(
@@ -327,7 +392,7 @@ export async function sendMediaMessage(input: {
     }
     const waMessageId = await callGraphSend(credentials!, {
       messaging_product: "whatsapp",
-      to: recipient,
+      ...target.destinatario,
       type: kind,
       [kind]: mediaPayload,
     });
@@ -397,10 +462,18 @@ export async function sendStructured(
     | { kind: "contacts"; contacts: ContactInput[] }
   )
 ): Promise<SendResult> {
-  const { credentials, recipient } = await prepareSend(
+  const target = await prepareSend(
     input.conversationId,
     input.organizationId
   );
+  // Ubicaciones y contactos son mensajes de WhatsApp: en los demás canales no
+  // hay credenciales de WhatsApp que usar y Graph los rechazaría.
+  if (!target.credentials) {
+    throw new SendError(
+      "meta_error",
+      "Este canal no admite ubicaciones ni contactos; manda el texto"
+    );
+  }
 
   const payload =
     input.kind === "location"
@@ -413,9 +486,9 @@ export async function sendStructured(
           })),
         };
 
-  const waMessageId = await callGraphSend(credentials!, {
+  const waMessageId = await callGraphSend(target.credentials, {
     messaging_product: "whatsapp",
-    to: recipient,
+    ...target.destinatario,
     ...payload,
   });
 
@@ -523,6 +596,60 @@ async function callInstagramSend(
         throw new SendError(
           "meta_unavailable",
           "Instagram no está disponible en este momento; intenta de nuevo"
+        );
+      }
+      throw new SendError("meta_error", err.message);
+    }
+    throw err;
+  }
+}
+
+/**
+ * 017 — Envío por el canal de Messenger. Mismo vocabulario de SendError que
+ * WhatsApp e Instagram: la bandeja no aprende un idioma por plataforma.
+ */
+async function callMessengerSend(
+  target: SendTarget,
+  text: string
+): Promise<string> {
+  const creds = target.messenger!;
+
+  const caps = capabilitiesFor("messenger");
+  if (!textFits("messenger", text)) {
+    throw new SendError(
+      "meta_error",
+      `${caps.label} no acepta mensajes de más de ${caps.maxTextBytes} bytes: acorta el texto`
+    );
+  }
+
+  // Messenger no tiene plantillas: fuera de la ventana de 24 h la única vía
+  // es la etiqueta de agente humano (hasta 7 días).
+  const humanAgentTag = !isWindowOpen(target.conversation.lastInboundAt);
+
+  try {
+    const res = await sendMessengerText({
+      credentials: creds,
+      recipient: target.recipient,
+      // Zernio responde dentro de SU conversación, no al PSID: sin esta
+      // referencia el envío no tiene a dónde ir.
+      threadRef: target.conversation.channelThreadRef,
+      text,
+      humanAgentTag,
+    });
+    return res.platformMessageId;
+  } catch (err) {
+    if (err instanceof MetaApiError) {
+      if (err.isAuthError) {
+        await markMessengerReconnectRequired(creds.organizationId);
+        throw new SendError(
+          "reconnect_required",
+          "El token de la página expiró o fue revocado: reconecta Messenger"
+        );
+      }
+      if (err.status === 0 || err.status >= 500) {
+        throw new SendError(
+          "meta_unavailable",
+          "Messenger no está disponible en este momento; intenta de nuevo"
         );
       }
       throw new SendError("meta_error", err.message);

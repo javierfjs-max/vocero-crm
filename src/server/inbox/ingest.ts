@@ -5,9 +5,11 @@ import { normalizeMx } from "@/lib/meta/client";
 import { publish } from "@/server/events/bus";
 import { getCredentialsByPhoneNumberId } from "@/server/whatsapp/credentials";
 import { ensureAssetAvailable } from "@/server/whatsapp/media";
+import type { Channel } from "@/lib/channels";
 import type {
   WebhookMediaPayload,
   WebhookMessage,
+  WebhookReferral,
   WebhookValue,
 } from "@/server/inbox/webhook";
 import {
@@ -16,6 +18,8 @@ import {
   type ResolvedIdentity,
 } from "@/server/inbox/identity";
 import { applyStatusUpdate } from "@/server/inbox/status";
+import { atribucionEnabled } from "@/server/attribution/flag";
+import { recordAttribution } from "@/server/attribution/store";
 import { onLeadActivity } from "@/server/inbox/lead-activity";
 import { maybeRunAgentTurn } from "@/server/ai/trigger";
 
@@ -163,7 +167,7 @@ export async function getOrCreateContact(
 export async function getOrCreateConversation(
   organizationId: string,
   contactId: string,
-  opts?: { channel?: "whatsapp" | "instagram"; threadRef?: string | null }
+  opts?: { channel?: Channel; threadRef?: string | null }
 ) {
   const db = getDb();
   const inserted = await db
@@ -248,6 +252,7 @@ export async function processMessagesValue(value: WebhookValue): Promise<void> {
       text: msg.text?.body ?? null,
       timestamp: msg.timestamp,
       media: mediaInputFrom(msg),
+      referral: msg.referral ?? null,
     });
   }
 }
@@ -381,6 +386,8 @@ export async function ingestInboundMessage(input: {
   media?: MediaInput | null;
   /** 014: hilo en la plataforma de origen (Zernio); null en WhatsApp. */
   threadRef?: string | null;
+  /** 016: origen del anuncio, si el mensaje vino de uno. */
+  referral?: WebhookReferral | null;
 }): Promise<void> {
   const db = getDb();
   const { organizationId } = input;
@@ -394,6 +401,20 @@ export async function ingestInboundMessage(input: {
     contact.id,
     { channel: contact.channel, threadRef: input.threadRef ?? null }
   );
+
+  // 016 — Si el mensaje viene de un anuncio, capturar su origen ANTES del
+  // dedup de mensaje: es idempotente por sí mismo (el primer referral gana) y
+  // así un reintento de Meta que llegue con el referral no lo pierde por
+  // haberse cortado antes en el dedup. Solo con la bandera encendida: una
+  // instancia que no atribuye no guarda identificadores de clic (ADR-001).
+  if (input.referral && atribucionEnabled()) {
+    await recordAttribution({
+      organizationId,
+      contactId: contact.id,
+      conversationId: conversation.id,
+      referral: input.referral,
+    });
+  }
 
   const waTimestamp = toDate(input.timestamp);
 

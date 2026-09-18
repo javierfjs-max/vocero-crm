@@ -18,6 +18,7 @@ import { matchesHandoffIntent } from "@/server/ai/handoff";
 import { buildAgentSystemPrompt } from "@/server/ai/prompts";
 import { agendaEnabled } from "@/server/agenda/flag";
 import { bookSlot, offerSlots } from "@/server/agenda/agent";
+import { getOffers, mapaDeHuecosParaModelo } from "@/server/agenda/offers";
 
 /**
  * Turno del agente (FR-021..FR-025).
@@ -152,6 +153,30 @@ export async function runAgentTurn(conversationId: string): Promise<void> {
     .orderBy(asc(schema.pipelineStage.position));
 
   const agenda = agendaEnabled();
+
+  /**
+   * 015 — Los huecos vigentes, con su instante exacto.
+   *
+   * `book_slot` exige el `startUtc` y `findOffered` compara por epoch, sin
+   * tolerancia. Pero al modelo solo le llegaban el prompt y el historial de
+   * TEXTO, donde están las etiquetas que leyó el cliente —«lun 7 sep, 11:00»—
+   * sin año, sin zona y sin la fecha de hoy. Con eso, acertar el instante era
+   * cuestión de suerte: el rechazo caía siempre en `slot_not_offered`, cuyo
+   * texto es fijo, y la conversación se quedaba en bucle repitiendo la lista.
+   *
+   * Es un agujero de INTEGRACIÓN: las pruebas de contrato pasan porque
+   * inyectan el ISO correcto, que es justo lo que el modelo no tenía.
+   *
+   * Sin oferta vigente no se añade nada, así que el modelo sigue obligado a
+   * ofrecer antes de reservar. Se entrega el catálogo COMPLETO, no solo los
+   * tres que se enseñaron: si el cliente pide otro día, ese hueco ya estaba
+   * registrado como ofrecido y ahora el modelo también lo conoce.
+   *
+   * Reportado por @Diony7004 en #50, con el diagnóstico ya hecho.
+   */
+  const ofertas = agenda ? await getOffers(organizationId, conversationId) : [];
+  const mapaDeHuecos = mapaDeHuecosParaModelo(ofertas);
+
   const messages: ChatMessage[] = [
     {
       role: "system",
@@ -163,6 +188,13 @@ export async function runAgentTurn(conversationId: string): Promise<void> {
         role: m.direction === "in" ? ("user" as const) : ("assistant" as const),
         content: m.text!,
       })),
+    /**
+     * Va AL FINAL, después del historial: es el estado de AHORA, y ponerlo
+     * antes lo dejaría enterrado bajo la conversación en cuanto esta crezca.
+     */
+    ...(mapaDeHuecos
+      ? [{ role: "system" as const, content: mapaDeHuecos }]
+      : []),
   ];
 
   const result = await chatJson(agentActionSchema(agenda), messages);

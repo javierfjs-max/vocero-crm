@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { getEnv } from "@/lib/env";
 import {
   ConnectorError,
@@ -39,8 +40,36 @@ export const GOOGLE_SCOPE = "https://www.googleapis.com/auth/calendar.events";
 const CONFERENCE_POLLS = 3;
 const POLL_DELAY_MS = 400;
 
+/**
+ * La clave del caché incluye TODO lo que determina el token.
+ *
+ * Era `clientId:calendarId`. Como el refresh token y el secreto no entraban,
+ * cambiar credenciales no tenía efecto observable hasta que el token expiraba
+ * —una hora— y el operador concluía que las nuevas también estaban mal. Pasó
+ * de verdad: tras corregir el scope y regenerar el refresh token, la prueba
+ * seguía devolviendo el MISMO 403, palabra por palabra (#50, punto 3).
+ *
+ * Va como hash y no en claro porque esta clave vive en memoria del proceso y
+ * no hay motivo para tener un refresh token dando vueltas en ella.
+ */
+function claveDeToken(creds: GoogleCreds): string {
+  // `JSON.stringify` del array y no un separador a mano: los valores son
+  // opacos y una concatenación cruda podría colisionar entre credenciales
+  // distintas. Aquí la ambigüedad la resuelve el propio formato.
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        creds.clientId,
+        creds.clientSecret,
+        creds.refreshToken,
+        creds.calendarId,
+      ])
+    )
+    .digest("hex");
+}
+
 async function getAccessToken(creds: GoogleCreds): Promise<string> {
-  const key = `${creds.clientId}:${creds.calendarId}`;
+  const key = claveDeToken(creds);
   const cached = getCachedGoogleToken(key);
   if (cached) return cached;
 
@@ -220,11 +249,25 @@ export const googleConnector: AgendaConnector<GoogleCreds> = {
 
   async testConnection(creds): Promise<TestConnectionResult> {
     try {
-      const cal = (await googleFetch(
+      /**
+       * Se listan eventos, no se lee el calendario.
+       *
+       * `GET /calendars/{id}` es `Calendars.Get`, y Google solo lo concede con
+       * `calendar.readonly` o superior. Con el scope que este conector pide de
+       * verdad —`calendar.events`, suficiente para insert/get/patch/delete— la
+       * llamada devuelve 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT: la conexión
+       * funcionaba y su PROPIA prueba fallaba (#50, punto 2).
+       *
+       * Listar un evento sí entra en `calendar.events`, así que el scope
+       * documentado sigue siendo el mínimo — que es la razón de pedirlo.
+       */
+      const lista = (await googleFetch(
         creds,
-        `/calendars/${encodeURIComponent(creds.calendarId)}`
+        eventsPath(creds, "?maxResults=1")
       )) as { summary?: string } | null;
-      return { ok: true, detail: cal?.summary };
+      // `summary` del listado es el nombre del calendario: el mismo dato que
+      // se enseñaba antes, por una vía que el scope permite.
+      return { ok: true, detail: lista?.summary };
     } catch (err) {
       return {
         ok: false,

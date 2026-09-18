@@ -63,6 +63,14 @@ function applyMockContent(
   }
 }
 
+/** 016 — Campos para simular que el mensaje vino de un anuncio CTWA. */
+type MockReferralInput = {
+  /** Identificador del clic. Sin él no hay nada que reportarle a Meta. */
+  ctwaClid?: string;
+  adHeadline?: string;
+  adSourceId?: string;
+};
+
 export function buildInboundPayload(input: {
   wabaId: string;
   phoneNumberId: string;
@@ -75,7 +83,8 @@ export function buildInboundPayload(input: {
   text?: string;
   waMessageId?: string;
   timestamp?: number;
-} & MockMediaInput) {
+} & MockMediaInput &
+  MockReferralInput) {
   const type = input.type ?? "text";
   const message: Record<string, unknown> = {
     id: input.waMessageId ?? nextWamid("in"),
@@ -86,8 +95,32 @@ export function buildInboundPayload(input: {
   if (input.fromUserId) message.from_user_id = input.fromUserId;
   applyMockContent(message, type, input);
 
+  // 016 — El referral solo viaja cuando la conversación nació de un anuncio, y
+  // normalmente solo en el primer mensaje. Se arma igual que el real para que
+  // la ingesta no sepa que habla con un mock.
+  if (input.ctwaClid || input.adHeadline || input.adSourceId) {
+    message.referral = {
+      source_type: "ad",
+      source_id: input.adSourceId ?? "1200000000000",
+      source_url: "https://fb.me/anuncio-de-prueba",
+      headline: input.adHeadline ?? "Anuncio de prueba",
+      body: "Escríbenos por WhatsApp",
+      media_type: "image",
+      ...(input.ctwaClid ? { ctwa_clid: input.ctwaClid } : {}),
+    };
+  }
+
   const contactEntry: Record<string, unknown> = {
-    profile: { name: input.name ?? "Cliente" },
+    /**
+     * Sin nombre pedido, el payload va SIN `profile` — como el de Meta.
+     *
+     * Antes se inventaba «Cliente», y eso dejó de ser inofensivo en cuanto el
+     * nombre del contacto pasó a mantenerse al día con el perfil (#51): un
+     * segundo mensaje de la misma persona lo renombraba a «Cliente», que es
+     * algo que Meta no manda nunca. Un mock que inventa datos acaba probando
+     * su propia ficción.
+     */
+    ...(input.name ? { profile: { name: input.name } } : {}),
   };
   if (input.from) contactEntry.wa_id = input.from;
   if (input.fromUserId) contactEntry.user_id = input.fromUserId;

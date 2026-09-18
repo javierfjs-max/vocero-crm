@@ -1,5 +1,5 @@
 import { and, eq, or } from "drizzle-orm";
-import type { Channel } from "@/lib/channels";
+import { CHANNEL_LABEL, type Channel } from "@/lib/channels";
 import { getDb, schema } from "@/lib/db";
 import { newId } from "@/lib/db/ids";
 import { normalizeMx } from "@/lib/meta/client";
@@ -18,6 +18,8 @@ import type { WebhookMessage, WebhookValue } from "@/server/inbox/webhook";
 export const BSUID_PREFIX = "bsuid:";
 /** 014: identidad de Instagram, analoga al BSUID de WhatsApp. */
 export const IG_PREFIX = "ig:";
+/** 017: identidad de Messenger: el Page-Scoped ID (PSID) del remitente. */
+export const FB_PREFIX = "fb:";
 
 // El tipo vive en lib/ porque la interfaz tambien lo necesita; se reexporta
 // aqui para no tocar a quien ya lo importaba de este modulo.
@@ -87,17 +89,18 @@ export async function getOrCreateContactByIdentity(
 
   const channel: Channel = resolved.channel ?? "whatsapp";
 
-  // 014: Instagram no comparte espacio de identidades con WhatsApp. La
-  // reconciliacion telefono<->BSUID es exclusiva de WhatsApp, asi que en
-  // Instagram la busqueda es directa por identidad.
-  if (channel === "instagram") {
+  // 014/017: los canales de Meta (Instagram, Messenger) no comparten espacio
+  // de identidades con WhatsApp. La reconciliacion telefono<->BSUID es
+  // exclusiva de WhatsApp, asi que en ellos la busqueda es directa por
+  // identidad dentro de su canal.
+  if (channel !== "whatsapp") {
     const found = await db
       .select()
       .from(schema.contact)
       .where(
         and(
           eq(schema.contact.organizationId, organizationId),
-          eq(schema.contact.channel, "instagram"),
+          eq(schema.contact.channel, channel),
           eq(schema.contact.waIdentity, resolved.identity)
         )
       )
@@ -118,11 +121,11 @@ export async function getOrCreateContactByIdentity(
       .values({
         id: newId("contact"),
         organizationId,
-        channel: "instagram",
+        channel,
         waIdentity: resolved.identity,
         phone: null,
         waUserId: null,
-        name: resolved.profileName?.trim() || "Contacto de Instagram",
+        name: resolved.profileName?.trim() || channelFallback(channel),
       })
       .onConflictDoNothing({
         target: [
@@ -139,7 +142,7 @@ export async function getOrCreateContactByIdentity(
       .where(
         and(
           eq(schema.contact.organizationId, organizationId),
-          eq(schema.contact.channel, "instagram"),
+          eq(schema.contact.channel, channel),
           eq(schema.contact.waIdentity, resolved.identity)
         )
       )
@@ -179,6 +182,24 @@ export async function getOrCreateContactByIdentity(
     if (resolved.waUserId && !existing.waUserId)
       patch.waUserId = resolved.waUserId;
     if (resolved.phone && !existing.phone) patch.phone = resolved.phone;
+    /**
+     * El nombre del perfil se mantiene al dia (#51).
+     *
+     * Se actualizaba SOLO al crear el contacto, asi que quien cambiaba su
+     * nombre de WhatsApp seguia apareciendo con el viejo para siempre.
+     *
+     * No se toca si lo escribio una persona: el operador que renombro a
+     * alguien como "Juan - obra Polanco" no puede perder ese trabajo con el
+     * siguiente mensaje. Esa es toda la razon de que exista `nameSource`.
+     */
+    const delPerfil = resolved.profileName?.trim();
+    if (
+      delPerfil &&
+      existing.nameSource === "perfil" &&
+      delPerfil !== existing.name
+    ) {
+      patch.name = delPerfil;
+    }
     if (existing.archivedAt) patch.archivedAt = null;
     if (Object.keys(patch).length > 0) {
       patch.updatedAt = new Date();
@@ -231,4 +252,12 @@ export async function getOrCreateContactByIdentity(
 function displayFallback(resolved: ResolvedIdentity): string {
   if (resolved.phone) return resolved.phone;
   return "Contacto de WhatsApp";
+}
+
+/**
+ * Respaldo para los canales cuyo webhook no trae nombre: nunca el IGSID ni el
+ * PSID crudos, que en la bandeja no le dicen nada al operador.
+ */
+function channelFallback(channel: Channel): string {
+  return `Contacto de ${CHANNEL_LABEL[channel] ?? channel}`;
 }

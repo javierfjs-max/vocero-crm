@@ -64,7 +64,11 @@ export const PATCH = withAuth(async (session, req: Request, ctx: Params) => {
   }
 
   const set: Record<string, unknown> = { updatedAt: new Date() };
-  if (body.data.name !== undefined) set.name = body.data.name;
+  if (body.data.name !== undefined) {
+    set.name = body.data.name;
+    // Lo escribio una persona: a partir de aqui WhatsApp ya no lo pisa (#51).
+    set.nameSource = "manual";
+  }
   if (body.data.notes !== undefined) set.notes = body.data.notes;
   if (body.data.archived !== undefined) {
     set.archivedAt = body.data.archived ? new Date() : null;
