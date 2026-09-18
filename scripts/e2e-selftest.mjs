@@ -1108,6 +1108,7 @@ async function main() {
   await agendaChecks();
   await pulirBorradorChecks(conv008.id);
   await atribucionChecks();
+  await cabecerasChecks();
 
   console.log(`\n===== ${checks - failures}/${checks} checks OK, ${failures} fallos =====`);
   process.exit(failures > 0 ? 1 : 0);
@@ -2092,4 +2093,37 @@ async function atribucionChecks() {
     act7.length >= 3,
     `${act7.length} filas`
   );
+}
+
+/* ============================================================
+ * Cabeceras de seguridad (tests/e2e/us-cabeceras-seguridad.md)
+ *
+ * Se comprueban contra una respuesta REAL y en varias superficies: si
+ * viviesen en etiquetas del proxy, un despliegue de Coolify las borraría y
+ * nadie se enteraría. Aquí fallan ruidosamente.
+ * ============================================================ */
+
+async function cabecerasChecks() {
+  console.log("\n== cabeceras de seguridad ==");
+
+  const esperadas = {
+    "x-frame-options": "DENY",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "strict-origin-when-cross-origin",
+    "strict-transport-security": "max-age=31536000",
+    "permissions-policy": "camera=(), microphone=(), geolocation=()",
+  };
+
+  // La pública (sin sesión) y una de la app: las cabeceras son para TODA
+  // respuesta, no solo para las que pasan por el layout autenticado.
+  for (const ruta of ["/login", "/api/health"]) {
+    const res = await fetch(`${BASE}${ruta}`, { headers: { origin: BASE } });
+    for (const [k, v] of Object.entries(esperadas)) {
+      ok(
+        `${ruta}: ${k}`,
+        res.headers.get(k) === v,
+        `esperado "${v}", recibido "${res.headers.get(k)}"`
+      );
+    }
+  }
 }
