@@ -21,7 +21,11 @@ Con `AGENDA` ausente:
    llave: el endpoint no existe aquí.
 3. La pantalla `/bookings` responde 404 y la navegación no la menciona.
 
-Con `AGENDA=on`, las mismas rutas responden con normalidad.
+4. `GET /api/bot/context` **no** trae `booking` — ni vacío: un bloque vacío en
+   una instancia sin agenda se leería como «este lead no tiene cita».
+
+Con `AGENDA=on`, las mismas rutas responden con normalidad, y el contexto trae
+`booking` (sin citas: `next`, `unresolved` y `lastClosed` en `null`).
 
 ## US2 — El negocio define cuándo atiende
 
@@ -47,10 +51,39 @@ Con `AGENDA=on`, las mismas rutas responden con normalidad.
 4. Las alternativas del `409` ya son la oferta vigente: reservar una de ellas
    responde 201 de inmediato.
 5. **Reprogramar** por la superficie del bot responde **200**, no 201.
+6. **El contexto del cerebro sabe de la cita**: tras reservar,
+   `GET /api/bot/context` trae `booking.next` con el id de ESA cita, su
+   `startUtc`/`endUtc`, `status: "agendada"`, la etiqueta con el día en
+   palabras en la zona del negocio (`booking.timezone`) y el enlace que se le
+   dio al cliente. Tras reprogramar, la misma cita en su instante nuevo. Sin
+   esto un cerebro solo conoce la cita por el historial: reserva una segunda
+   para quien no llegó a la primera, o da por vigente una que ya pasó.
+
+## US3b — Un día concreto (huecos por fecha)
+
+Un lead propio, al final de la sección 015 del arnés, que pregunta «¿tienen
+algo mañana en la tarde?». En la prueba de punta a punta raíz + Nea, sin esto,
+el cerebro solo veía las tres primeras horas de mañana y contestó que solo
+había mañana.
+
+1. **Sin `date`, la forma de siempre**: `slots` (con `startUtc`, `endUtc`,
+   `label`, `dayIso`, `dayLabel`, `time`) y `diasConAgenda`, más `query` con
+   `date: null`, `perDay: 3`, `coveredUntil` y `horizonEnd`.
+2. **Con `date` = mañana**: 200 con `query.date` = ese día y
+   `query.status: "available"`; solo horas de ese día, más de las tres del
+   reparto, y alguna de la tarde.
+3. Un día más allá del horizonte responde `beyond_horizon` sin horas, y una
+   fecha inexistente (`2026-02-31`) **422 `invalid_body`** — ninguna de las dos
+   borra la oferta vigente.
+4. **Reservar** una hora de la tarde ofrecida por fecha responde **201**, con
+   esa hora en la etiqueta, y deja de ofrecerse para ese día.
 
 ## US4 — El operador
 
-1. Cancelar dos veces no falla (idempotente).
+1. Cancelar dos veces no falla (idempotente). Cancelada desde el panel, el
+   contexto del cerebro ya **no** la da por vigente (`booking.next`) y la trae
+   en `booking.lastClosed` con `status: "cancelada"`, `cancelledBy: "equipo"`
+   y sin enlace: así el cerebro dice «se canceló» en vez de inventar un motivo.
 2. Reintentar el enlace de una cita que ya lo tiene responde 422.
 3. **El proveedor caído no cuesta la conversión**: con el conector externo sin
    credenciales, reservar responde **201 igualmente**, con

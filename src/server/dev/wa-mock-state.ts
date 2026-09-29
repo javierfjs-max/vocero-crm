@@ -52,10 +52,22 @@ export type CapiMockEvent = {
   at: string;
 };
 
+/**
+ * La suscripción de la app a una WABA (`{WABA}/subscribed_apps`), con su
+ * override de callback si alguien lo configuró. Existe para que el self-test
+ * pueda comprobar que guardar la conexión NO borra el override de un cerebro
+ * externo: en Meta, un POST sin cuerpo lo elimina, y el mock hace lo mismo.
+ */
+export type MockWabaSubscription = {
+  overrideCallbackUri: string | null;
+};
+
 type WaMockState = {
   outbox: OutboxEntry[];
   templates: MockTemplate[];
   capiEvents: CapiMockEvent[];
+  /** Por WABA ID. Sin entrada = la app no está suscrita a esa WABA. */
+  wabaSubscriptions: Record<string, MockWabaSubscription>;
   counter: number;
   seal: string;
 };
@@ -66,15 +78,20 @@ function newSeal(): string {
   return Math.random().toString(36).slice(2, 8);
 }
 
+function freshState(): WaMockState {
+  return {
+    outbox: [],
+    templates: [],
+    capiEvents: [],
+    wabaSubscriptions: {},
+    counter: 0,
+    seal: newSeal(),
+  };
+}
+
 export function getWaMockState(): WaMockState {
   if (!globalForMock.__waMockState) {
-    globalForMock.__waMockState = {
-      outbox: [],
-      templates: [],
-      capiEvents: [],
-      counter: 0,
-      seal: newSeal(),
-    };
+    globalForMock.__waMockState = freshState();
   }
   // Estado creado por una versión del módulo sin sello (dev recarga módulos).
   if (!globalForMock.__waMockState.seal) {
@@ -84,13 +101,7 @@ export function getWaMockState(): WaMockState {
 }
 
 export function resetWaMockState(): void {
-  globalForMock.__waMockState = {
-    outbox: [],
-    templates: [],
-    capiEvents: [],
-    counter: 0,
-    seal: newSeal(),
-  };
+  globalForMock.__waMockState = freshState();
 }
 
 export function nextN(): number {

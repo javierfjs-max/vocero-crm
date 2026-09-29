@@ -302,7 +302,7 @@ export function InboxClient({ channels }: { channels: readonly Channel[] }) {
               <button
                 onClick={() => setSelectedId(null)}
                 aria-label="Volver a las conversaciones"
-                className="shrink-0 rounded-md p-1.5 text-text-2 hover:bg-accent hover:text-foreground md:hidden"
+                className="shrink-0 rounded-md p-1.5 text-text-2 hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:hidden"
               >
                 <ChevronLeft className="h-5 w-5" strokeWidth={1.8} />
               </button>
@@ -339,7 +339,7 @@ export function InboxClient({ channels }: { channels: readonly Channel[] }) {
                 <button
                   onClick={() => togglePanel(true)}
                   aria-label="Mostrar detalles"
-                  className="shrink-0 rounded-full border border-border-strong p-1.5 text-text-3 transition-colors hover:border-text-3 hover:text-foreground"
+                  className="shrink-0 rounded-full border border-border-strong p-1.5 text-text-3 transition-colors hover:border-text-3 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <PanelRight className="h-4 w-4" strokeWidth={1.7} />
                 </button>
@@ -381,7 +381,7 @@ export function InboxClient({ channels }: { channels: readonly Channel[] }) {
           "shrink-0 overflow-hidden border-l transition-[width] duration-200",
           // Debajo de xl no hay ancho para una tercera columna: el panel se
           // vuelve un cajón que entra desde la derecha, encima del hilo.
-          "max-xl:fixed max-xl:inset-y-0 max-xl:right-0 max-xl:z-40 max-xl:w-auto max-xl:bg-background max-xl:transition-transform",
+          "max-xl:fixed max-xl:inset-y-0 max-xl:right-0 max-xl:z-40 max-xl:w-auto max-xl:bg-popover max-xl:transition-transform",
           panelOpen && selected
             ? "w-[320px] max-xl:translate-x-0 max-xl:shadow-pop"
             : "w-0 border-l-0 max-xl:translate-x-full"
