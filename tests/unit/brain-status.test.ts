@@ -1,8 +1,9 @@
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BrainHealthDto } from "@/lib/brain-status";
+import type { BrainDispatchDto, BrainHealthDto } from "@/lib/brain-status";
 import {
+  SIN_DESPACHO,
   externalAnswerLabel,
   externalAnswering,
   externalBrainName,
@@ -25,9 +26,9 @@ import {
 
 /**
  * «Quién responde a tus clientes». Lo que se protege: que el dueño sepa si
- * contesta el agente incluido, su cerebro externo (Nea), los dos (el cliente
- * recibe dos respuestas) o nadie — y que preguntarle a Nea jamás cuelgue la
- * pantalla ni filtre la URL con sus secretos.
+ * contesta su agente (el cerebro al que el CRM despacha), si está apagado o si
+ * la bandeja es manual — y que preguntarle a Nea jamás cuelgue la pantalla ni
+ * filtre la URL con sus secretos.
  */
 
 const NOW = new Date("2026-09-21T18:00:00.000Z");
@@ -60,95 +61,73 @@ function status(over: Partial<BrainStatusInput>) {
   });
 }
 
-describe("computeBrainStatus — los casos que ve el dueño", () => {
-  it("solo Nea: llave usada hace 3 min, agente incluido apagado → sin aviso", () => {
-    const s = status({ botKeyConfigured: true, lastSeenAt: HACE_3_MIN, health: EN_LINEA });
-    expect(s.embedded).toEqual({ configured: false, enabled: false, answering: false });
+const DESPACHANDO: BrainDispatchDto = {
+  ...SIN_DESPACHO,
+  active: true,
+  host: "nea:8000",
+};
+
+describe("computeBrainStatus — 036: contesta el cerebro al que se le despacha", () => {
+  it("sin despacho, la llave nueva es la de una instancia que no despacha", () => {
+    expect(status({}).dispatch).toEqual(SIN_DESPACHO);
+  });
+
+  it("despacho e interruptor: contesta el cerebro, sin aviso", () => {
+    const s = status({
+      aiConfigured: true,
+      agentEnabled: true,
+      botKeyConfigured: true,
+      lastSeenAt: HACE_3_MIN,
+      health: EN_LINEA,
+      dispatch: DESPACHANDO,
+    });
+    expect(s.enabled).toBe(true);
+    expect(s.aiConfigured).toBe(true);
     expect(s.external.active).toBe(true);
-    expect(s.external.lastSeenAt).toBe(HACE_3_MIN.toISOString());
     expect(s.warning).toBeNull();
+    expect(s.dispatch).toEqual(DESPACHANDO);
+    expect(externalAnswering(s)).toBe(true);
   });
 
-  it("solo el agente incluido: token + interruptor, sin llave → sin aviso", () => {
-    const s = status({ aiConfigured: true, agentEnabled: true });
-    expect(s.embedded.answering).toBe(true);
-    expect(s.external).toEqual({ keyConfigured: false, lastSeenAt: null, active: false, health: null });
+  it("despacho con el interruptor apagado → aviso apagado, y no contesta nadie", () => {
+    const s = status({ botKeyConfigured: true, health: EN_LINEA, dispatch: DESPACHANDO });
+    expect(s.warning).toBe("apagado");
+    expect(externalAnswering(s)).toBe(false);
+  });
+
+  it("despacho e interruptor con el /health caído: se ve caído", () => {
+    const s = status({ agentEnabled: true, botKeyConfigured: true, health: CAIDA, dispatch: DESPACHANDO });
     expect(s.warning).toBeNull();
+    expect(externalDown(s)).toBe(true);
+    expect(externalAnswering(s)).toBe(false);
   });
 
-  it("los dos contestando → doble_respuesta (por la llamada reciente)", () => {
-    const s = status({ aiConfigured: true, agentEnabled: true, botKeyConfigured: true, lastSeenAt: HACE_3_MIN });
-    expect(s.warning).toBe("doble_respuesta");
+  it("sin despacho → sin_cerebro (bandeja manual), con o sin IA e interruptor", () => {
+    for (const aiConfigured of [false, true])
+      for (const agentEnabled of [false, true]) {
+        const s = status({ aiConfigured, agentEnabled, botKeyConfigured: true, health: EN_LINEA });
+        expect(s.warning).toBe("sin_cerebro");
+        expect(externalAnswering(s)).toBe(false);
+      }
   });
 
-  it("los dos contestando → doble_respuesta (por el /health, aunque no haya llamado)", () => {
-    const s = status({ aiConfigured: true, agentEnabled: true, botKeyConfigured: true, health: EN_LINEA });
-    expect(s.warning).toBe("doble_respuesta");
-  });
-
-  it("nadie: sin agente incluido y sin llave → sin_cerebro", () => {
-    expect(status({}).warning).toBe("sin_cerebro");
-    // Apagado a propósito con token: tampoco contesta nadie.
-    expect(status({ aiConfigured: true }).warning).toBe("sin_cerebro");
-  });
-
-  it("el interruptor encendido sin token NO contesta", () => {
-    const s = status({ agentEnabled: true });
-    expect(s.embedded).toEqual({ configured: false, enabled: true, answering: false });
+  it("despacho mal configurado cuenta como sin cerebro", () => {
+    const roto: BrainDispatchDto = { ...SIN_DESPACHO, host: "nea:8000", problem: "sin_llave" };
+    const s = status({ aiConfigured: true, agentEnabled: true, dispatch: roto });
     expect(s.warning).toBe("sin_cerebro");
+    expect(s.dispatch.problem).toBe("sin_llave");
   });
 
-  it("Nea en línea pero sin llave: no puede hablar por el CRM → sin_cerebro", () => {
-    const s = status({ health: EN_LINEA });
-    expect(s.external.active).toBe(true);
-    expect(s.warning).toBe("sin_cerebro");
-  });
-
-  it("llave sin ninguna llamada desde el arranque: no cuenta como activo", () => {
-    const s = status({ aiConfigured: true, agentEnabled: true, botKeyConfigured: true });
-    expect(s.external.active).toBe(false);
-    expect(s.warning).toBeNull();
-  });
-
-  it("una llamada de hace 25 h ya no cuenta; justo 24 h todavía sí", () => {
-    const base = { aiConfigured: true, agentEnabled: true, botKeyConfigured: true };
-    expect(status({ ...base, lastSeenAt: HACE_25_H }).warning).toBeNull();
+  it("activo: llamada reciente (≤ 24 h), /health en línea o despacho", () => {
+    expect(status({ botKeyConfigured: true, lastSeenAt: HACE_3_MIN }).external.active).toBe(true);
     const justo = new Date(NOW.getTime() - EXTERNAL_SEEN_WINDOW_MS);
-    expect(status({ ...base, lastSeenAt: justo }).warning).toBe("doble_respuesta");
-  });
-
-  it("un /health caído no cuenta como activo, pero la llamada reciente sí", () => {
-    const base = { aiConfigured: true, agentEnabled: true, botKeyConfigured: true };
-    expect(status({ ...base, health: CAIDA }).warning).toBeNull();
-    expect(status({ ...base, health: CAIDA, lastSeenAt: HACE_3_MIN }).warning).toBe("doble_respuesta");
-  });
-
-  it("todas las combinaciones cumplen las tres reglas", () => {
-    const bools = [false, true];
-    const vistos = [null, HACE_3_MIN, HACE_25_H];
-    const healths = [null, EN_LINEA, CAIDA];
-    let n = 0;
-    for (const aiConfigured of bools)
-      for (const agentEnabled of bools)
-        for (const botKeyConfigured of bools)
-          for (const lastSeenAt of vistos)
-            for (const health of healths) {
-              const s = status({ aiConfigured, agentEnabled, botKeyConfigured, lastSeenAt, health });
-              const answering = aiConfigured && agentEnabled;
-              const active =
-                (botKeyConfigured && lastSeenAt === HACE_3_MIN) || health === EN_LINEA;
-              expect(s.embedded.answering).toBe(answering);
-              expect(s.external.active).toBe(active);
-              expect(s.warning).toBe(
-                answering && active
-                  ? "doble_respuesta"
-                  : !answering && !botKeyConfigured
-                    ? "sin_cerebro"
-                    : null
-              );
-              n++;
-            }
-    expect(n).toBe(72);
+    expect(status({ botKeyConfigured: true, lastSeenAt: justo }).external.active).toBe(true);
+    expect(status({ botKeyConfigured: true, lastSeenAt: HACE_25_H }).external.active).toBe(false);
+    expect(status({ health: EN_LINEA }).external.active).toBe(true);
+    expect(status({ health: CAIDA }).external.active).toBe(false);
+    expect(status({ dispatch: DESPACHANDO }).external.active).toBe(true);
+    // Sin llave, una llamada «reciente» no pudo haber pasado la autenticación.
+    expect(status({ lastSeenAt: HACE_3_MIN }).external.active).toBe(false);
   });
 });
 
@@ -162,30 +141,26 @@ describe("textos compartidos", () => {
     expect(externalAnswerLabel(sinNombre)).toBe("Responde tu cerebro externo");
   });
 
-  it("«responde tu cerebro externo» solo si no está caído; el aviso doble no espera a eso", () => {
-    const sano = status({ botKeyConfigured: true, lastSeenAt: HACE_3_MIN, health: EN_LINEA });
+  it("«responde tu cerebro externo» solo si se le despacha, está encendido y no está caído", () => {
+    const base = { agentEnabled: true, botKeyConfigured: true, dispatch: DESPACHANDO };
+    const sano = status({ ...base, health: EN_LINEA });
     expect(externalAnswering(sano)).toBe(true);
     expect(externalDown(sano)).toBe(false);
-    // Llamó hace 3 min pero su /health no contesta: sigue «activo» para el
-    // aviso de doble respuesta, pero no se le dice al dueño que responde.
-    const caido = status({ botKeyConfigured: true, lastSeenAt: HACE_3_MIN, health: CAIDA });
+    const caido = status({ ...base, lastSeenAt: HACE_3_MIN, health: CAIDA });
     expect(caido.external.active).toBe(true);
     expect(externalAnswering(caido)).toBe(false);
     expect(externalDown(caido)).toBe(true);
-    // Sin BRAIN_HEALTH_URL manda la llamada reciente.
-    const sinHealth = status({ botKeyConfigured: true, lastSeenAt: HACE_3_MIN });
-    expect(externalAnswering(sinHealth)).toBe(true);
-    expect(externalDown(sinHealth)).toBe(false);
+    // Sin URL de salud no se sabe si está caído: manda el despacho.
+    expect(externalAnswering(status(base))).toBe(true);
+    // Llamó hace 3 min pero el CRM no le despacha: no es quien contesta.
+    expect(externalAnswering(status({ botKeyConfigured: true, lastSeenAt: HACE_3_MIN, health: EN_LINEA }))).toBe(false);
   });
 
-  it("con BRAIN_HEALTH_URL mal escrita no se le da por caído: manda la llamada reciente", () => {
+  it("con BRAIN_HEALTH_URL mal escrita no se le da por caído", () => {
     const mal: BrainHealthDto = { reachable: false, host: "", checkedAt: NOW.toISOString(), problem: "config" };
-    const llamo = status({ botKeyConfigured: true, lastSeenAt: HACE_3_MIN, health: mal });
-    expect(externalDown(llamo)).toBe(false);
-    expect(externalAnswering(llamo)).toBe(true);
-    const callado = status({ botKeyConfigured: true, lastSeenAt: null, health: mal });
-    expect(externalDown(callado)).toBe(false);
-    expect(externalAnswering(callado)).toBe(false);
+    const s = status({ agentEnabled: true, botKeyConfigured: true, health: mal, dispatch: DESPACHANDO });
+    expect(externalDown(s)).toBe(false);
+    expect(externalAnswering(s)).toBe(true);
   });
 
   it("haceCuanto", () => {

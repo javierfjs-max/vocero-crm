@@ -1,8 +1,13 @@
 # Vocero CRM — Guía para Claude
 
-Vocero es un CRM de WhatsApp open source (MIT), self-hosted, con agente de IA y
-Laboratorio de auto-evaluación. Una instancia = un negocio. Este archivo guía a
-Claude Code (u otro asistente) para operar y **modificar** este repositorio —
+Lee primero [AGENTS.md](AGENTS.md): el mapa del código y las reglas de
+modificación viven ahí; este archivo solo añade lo específico de Claude Code.
+
+Vocero es un CRM de WhatsApp open source (MIT), self-hosted, con el perfil y el
+conocimiento del agente y un Laboratorio de auto-evaluación. Desde la 2.0 no
+trae agente: contesta un cerebro conectado al lado (Nea u otro). Una
+instancia = un negocio. Este archivo guía a Claude Code (u otro asistente)
+para operar y **modificar** este repositorio —
 el caso típico: una agencia adaptando Vocero para un cliente.
 
 ## Stack
@@ -22,22 +27,23 @@ conducidos con Playwright · Docker multi-stage (standalone, healthcheck
 
 Tiempo real por **SSE** (`/api/events`): heartbeat `: ping` ~25s, headers
 anti-buffering, catch-up por refetch con `since=`. Sin WebSockets, sin colas
-externas: el trabajo en segundo plano (agente, Laboratorio) es in-process.
+externas: el trabajo en segundo plano (el despacho al cerebro, el Laboratorio)
+es in-process.
 
 ## Mapa del código (fronteras de modificación)
 
 | Quieres cambiar… | Toca… |
 |---|---|
-| El cerebro/proveedor LLM | `src/lib/ai/` (adaptador OpenRouter-compatible, `chatJson<T>`) |
-| El comportamiento/prompt del agente | `src/server/ai/prompts.ts` |
-| Las acciones que puede tomar el agente | `src/server/ai/actions.ts` + ejecución en `src/server/ai/pipeline.ts` |
+| El proveedor LLM (juez del Laboratorio y proxy del cerebro) | `src/lib/ai/` (adaptador OpenRouter-compatible, `chatJson<T>`; `provider.ts` resuelve Ajustes → IA o `OPENROUTER_*`) |
+| El comportamiento del agente | No vive aquí: el CRM no trae agente (036). Lo que el agente lee —perfil, conocimiento (`renderKb` en `src/server/ai/prompts.ts`), `role`, `tools`, `llm`— sale por `src/server/bot/profile.ts`; lo demás es del cerebro (Nea) |
+| Cómo piensa el cerebro con la llave del CRM | `src/server/bot/llm-proxy.ts` + `src/app/api/bot/llm/[...ruta]/route.ts` |
 | Las personas o el juez del Laboratorio | `src/server/lab/personas.ts` · `src/server/lab/judge.ts` |
 | El canal WhatsApp (Graph API) | `src/lib/meta/` (cliente único) + `src/server/whatsapp/` |
 | Los canales opcionales (Instagram, Messenger; ADR-001) | `src/lib/channels.ts` (catálogo) · `src/server/channels/` (capacidades y bandera `CHANNELS`) · `src/server/instagram/` · `src/server/messenger/` · `src/server/zernio/` (transporte y firma de la API unificada, compartido) |
 | Campos/tablas | `src/lib/db/schema.ts` → `pnpm db:generate` → migración nueva en `drizzle/` |
 | La ingesta/envío de mensajes | `src/server/inbox/` (ingest idempotente, send con guard de sandbox, ventana 24h) |
 | Cómo se identifica a un contacto | `src/server/inbox/identity.ts` (teléfono normalizado o `bsuid:<id>`) |
-| Conectar TU propio bot en vez del agente | `src/app/api/bot/*` + `src/server/bot/auth.ts` (X-API-Key) · quién responde (agente incluido, cerebro externo, doble respuesta): `src/server/bot/status.ts` + `GET /api/agent/brain-status` |
+| Conectar el cerebro (Nea o el tuyo) | despacho: `src/server/dispatch/encolar.ts` (`despacharAlCerebro`) + `src/server/brains/` (`config.ts`: `despachoActivo`, `urlSaludCerebro`) · `src/app/api/bot/*` + `src/server/bot/auth.ts` (X-API-Key o Bearer) · contrato en `docs/openapi.json` · quién responde (avisos `sin_cerebro`, `apagado`): `src/server/bot/status.ts` + `GET /api/agent/brain-status` |
 | La agenda (horarios, huecos, citas) | `src/server/agenda/` — detrás de la bandera `AGENDA` (`flag.ts`) |
 | Cómo se entrega la reunión (Zoom, Meet…) | `src/server/agenda/connectors/` + catálogo en `src/lib/agenda-connectors.ts` · guía: [docs/agenda-conectores.md](docs/agenda-conectores.md) |
 | De qué anuncio llegó cada conversación (siempre visible) | `src/server/attribution/referral.ts` (normalización) · `creativo.ts` (copia de la imagen, solo hosts de Meta) · `store.ts` · tarjeta en `src/components/anuncio-origen.tsx` |
@@ -54,12 +60,16 @@ User IDs, así que `from` puede no venir. La llave estable es
 `contact.wa_identity` (teléfono normalizado 521→52, o `bsuid:<id>`); `phone` es
 un atributo OPCIONAL. Nunca asumas que un contacto tiene teléfono.
 
-**Cerebro externo**: `/api/bot/*` (autenticada por `BOT_API_KEY`) deja que un
-microservicio propio conduzca la conversación sin que el token de WhatsApp
-salga del CRM: marcar leído + "escribiendo…", descargar adjuntos y reiniciar la
-conversación de pruebas. Respeta `conversation.ai_enabled`/`handoff_at` igual
-que el agente in-process. Sin la key, esa superficie responde 401 y el CRM
-funciona igual.
+**El cerebro**: el CRM no contesta solo. Con `BRAIN_DISPATCH_URL` +
+`BOT_API_KEY` y el interruptor del Agente encendido (`agent_profile.enabled`;
+encenderlo exige el `/health` del cerebro sano, si no 409 `sin_cerebro`), le
+despacha cada ráfaga al cerebro, que conversa por `/api/bot/*` sin que el
+token de WhatsApp salga del CRM: responder, marcar leído + "escribiendo…",
+descargar adjuntos, reiniciar la conversación de pruebas, y pensar por
+`/api/bot/llm` con la llave de Ajustes → IA (la llave no sale del CRM).
+Respeta `conversation.ai_enabled`/`handoff_at`. Sin la key, esa superficie
+responde 401 y el CRM funciona igual, como bandeja manual. No reintroduzcas
+un turno dentro del proceso.
 
 ## Reglas de la constitución (no negociables)
 
@@ -90,10 +100,15 @@ Ver [.specify/memory/constitution.md](.specify/memory/constitution.md).
 
 ## Variables de entorno
 
+`pnpm init-env` crea el `.env` con los secretos ya generados y `pnpm doctor`
+lo valida con el mismo esquema del arranque (`safeParseEnv` en
+`src/lib/env.ts`), prueba la base, `MEDIA_DIR` y el token de WhatsApp.
 Ver `.env.example` (cada una con guía inline). Las claves: `APP_BASE_URL`,
 `DATABASE_URL`, `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY` (32 bytes base64),
 `META_WEBHOOK_VERIFY_TOKEN` (segmento secreto del webhook), `META_APP_SECRET`
-(opcional, firma), y para IA:
+(opcional, firma). La IA se configura desde la app (Ajustes → IA: proveedor,
+modelo y llave cifrada, con «Probar conexión»); las variables solo son el
+respaldo mientras no haya nada guardado ahí:
 
 ```bash
 OPENROUTER_API_TOKEN=sk-or-...

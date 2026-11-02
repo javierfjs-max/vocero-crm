@@ -1,19 +1,24 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
 import { getEnv } from "@/lib/env";
+import { borrarMedia, guardarMedia, leerMedia, rutaEnDisco } from "@/lib/storage/medios";
 import { graphRequest, MetaApiError } from "@/lib/meta/client";
 import {
   getCredentialsByOrg,
   type Credentials,
 } from "@/server/whatsapp/credentials";
+import { isForbiddenUploadMime } from "@/server/whatsapp/media-headers";
 
 /**
  * 008 — Única frontera de media con la Graph API (constitución II: todo el
- * tráfico a Meta pasa por adaptadores dedicados) + persistencia en el volumen
- * local `MEDIA_DIR`. Meta expira sus archivos (~30 días, URLs de minutos):
- * el disco propio es la copia durable que la UI previsualiza.
+ * tráfico a Meta pasa por adaptadores dedicados) + persistencia propia. Meta
+ * expira sus archivos (~30 días, URLs de minutos): la copia propia es la
+ * durable que la UI previsualiza.
+ *
+ * 037 — Esa copia vive en el disco (`MEDIA_DIR`) o en un bucket S3-compatible
+ * (`MEDIA_STORE=bucket`): lo decide `src/lib/storage/medios.ts`, que escribe
+ * donde diga la bandera y lee en los dos sitios. Estas funciones conservan su
+ * nombre para no tocar a quien las llama.
  */
 
 export type MediaKind = (typeof schema.mediaAsset.$inferSelect)["kind"];
@@ -70,11 +75,22 @@ export class MediaValidationError extends Error {
 /**
  * Valida MIME y tamaño para envío; devuelve el kind resuelto. Los formatos
  * que WhatsApp no acepta como su tipo nativo (p. ej. image/bmp) van como
- * documento — igual que hace la app de WhatsApp.
+ * documento — igual que hace la app de WhatsApp. HTML y SVG no van ni como
+ * documento (#78): el navegador de quien los abra los trataría como una
+ * página, y se servirían desde el origen del CRM.
  */
-export function validateOutgoing(mime: string, sizeBytes: number) {
+export function validateOutgoing(mimeConParametros: string, sizeBytes: number) {
+  // 044: `audio/ogg; codecs=opus` (la nota de voz, o lo que graba Firefox)
+  // trae parámetros; el tipo es lo de antes del `;`.
+  const mime = mimeConParametros.split(";")[0]!.trim();
   if (!/^[\w.-]+\/[\w.+-]+$/.test(mime)) {
     throw new MediaValidationError("unsupported_type", "Tipo de archivo no reconocido");
+  }
+  if (isForbiddenUploadMime(mime)) {
+    throw new MediaValidationError(
+      "unsupported_type",
+      "Los archivos HTML y SVG no se pueden enviar como adjunto: un navegador los abriría como página. Conviértelo a PDF o a imagen"
+    );
   }
   const kind = kindFromMime(mime);
   const limit = MEDIA_LIMITS[kind];
@@ -89,45 +105,33 @@ export function validateOutgoing(mime: string, sizeBytes: number) {
 
 /* ---------- Disco local ---------- */
 
-function assertSafeSegment(s: string): void {
-  if (!/^[\w.-]+$/.test(s)) throw new Error(`segmento de ruta inválido: ${s}`);
-}
-
-/** Ruta absoluta del archivo de un asset dentro de MEDIA_DIR. */
+/** Ruta absoluta del archivo de un asset en el volumen local (solo el disco). */
 export function mediaFilePath(organizationId: string, assetId: string): string {
-  assertSafeSegment(organizationId);
-  assertSafeSegment(assetId);
-  return path.join(getEnv().MEDIA_DIR, organizationId, assetId);
+  return rutaEnDisco(organizationId, assetId);
 }
 
+/** Guarda el binario donde toque y devuelve la ruta relativa que va a la BD. */
 export async function saveMediaFile(
   organizationId: string,
   assetId: string,
-  data: Buffer | Uint8Array
+  data: Buffer | Uint8Array,
+  contentType?: string
 ): Promise<string> {
-  const file = mediaFilePath(organizationId, assetId);
-  await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(file, data);
-  return path.join(organizationId, assetId); // ruta relativa persistida en BD
+  return guardarMedia(organizationId, assetId, data, contentType);
 }
 
-export async function readMediaFile(
-  organizationId: string,
-  assetId: string
-): Promise<Buffer> {
-  return readFile(mediaFilePath(organizationId, assetId));
+/** Lee el binario, del bucket o del disco (037: en los dos sitios). */
+export async function readMediaFile(organizationId: string, assetId: string): Promise<Buffer> {
+  return leerMedia(organizationId, assetId);
 }
 
 /**
  * 018 — Borra el archivo de un asset. Sin error si ya no estaba: quien lo
  * llama está deshaciendo una copia que sobró, y un archivo que no existe es
- * justo el estado al que quiere llegar.
+ * justo el estado al que quiere llegar. 037 — En los dos sitios.
  */
-export async function deleteMediaFile(
-  organizationId: string,
-  assetId: string
-): Promise<void> {
-  await rm(mediaFilePath(organizationId, assetId), { force: true });
+export async function deleteMediaFile(organizationId: string, assetId: string): Promise<void> {
+  await borrarMedia(organizationId, assetId);
 }
 
 /* ---------- Descarga desde Graph (entrantes y echoes) ---------- */
@@ -198,7 +202,12 @@ export async function downloadGraphMedia(
  */
 export async function ensureAssetAvailable(
   organizationId: string,
-  assetId: string
+  assetId: string,
+  /**
+   * Bajarlo aunque figure como disponible: el archivo se perdió (volumen sin
+   * montar, restauración a medias) y la fila todavía no lo sabe.
+   */
+  opts: { forzar?: boolean } = {}
 ): Promise<typeof schema.mediaAsset.$inferSelect | null> {
   const db = getDb();
   const rows = await db
@@ -208,7 +217,7 @@ export async function ensureAssetAvailable(
     .limit(1);
   const asset = rows[0];
   if (!asset || asset.organizationId !== organizationId) return null;
-  if (asset.fetchStatus === "available") return asset;
+  if (asset.fetchStatus === "available" && !opts.forzar) return asset;
   if (!asset.waMediaId) return null; // location/contacts no tienen binario
 
   const creds = await getCredentialsByOrg(organizationId);
@@ -219,7 +228,7 @@ export async function ensureAssetAvailable(
       creds.token,
       asset.waMediaId
     );
-    const storagePath = await saveMediaFile(organizationId, assetId, data);
+    const storagePath = await saveMediaFile(organizationId, assetId, data, mimeType ?? undefined);
     const updated = await db
       .update(schema.mediaAsset)
       .set({
@@ -240,6 +249,35 @@ export async function ensureAssetAvailable(
       .set({ fetchStatus: "failed", fetchError: message, updatedAt: new Date() })
       .where(eq(schema.mediaAsset.id, assetId));
     console.warn(`[media] descarga del asset ${assetId} falló: ${message}`);
+    return null;
+  }
+}
+
+/**
+ * Lee el archivo de un adjunto ya disponible.
+ *
+ * Si la base dice «disponible» pero el archivo no está —el contenedor se
+ * redesplegó sin un volumen en `/data` y se llevó los adjuntos—, se vuelve a
+ * bajar de Meta una vez, que los conserva unos 30 días. Sin esto, el adjunto
+ * quedaba en 410 para siempre aunque Meta todavía lo tuviera. `null` si ni
+ * así se puede: el archivo ya no existe en ningún lado.
+ */
+export async function leerAdjunto(
+  organizationId: string,
+  asset: typeof schema.mediaAsset.$inferSelect
+): Promise<{ asset: typeof schema.mediaAsset.$inferSelect; data: Buffer } | null> {
+  try {
+    return { asset, data: await readMediaFile(organizationId, asset.id) };
+  } catch {
+    // El archivo no está: se intenta recuperar de Meta.
+  }
+  const recuperado = await ensureAssetAvailable(organizationId, asset.id, { forzar: true });
+  if (!recuperado || recuperado.fetchStatus !== "available") return null;
+  try {
+    const data = await readMediaFile(organizationId, asset.id);
+    console.log(`[media] ${asset.id} no estaba en el volumen; se recuperó de Meta`);
+    return { asset: recuperado, data };
+  } catch {
     return null;
   }
 }

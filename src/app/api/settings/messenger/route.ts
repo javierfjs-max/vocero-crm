@@ -10,7 +10,9 @@ import {
   channelDisabledResponse,
   isChannelEnabled,
 } from "@/server/channels/enabled";
-import { verifyZernioToken } from "@/server/zernio";
+import { ensureWebhookForOrg } from "@/server/zernio/conexiones";
+import { accountHealth, zernioAccountName } from "@/server/zernio/cuentas";
+import { resolveZernioAccount } from "@/server/zernio/guardar";
 
 export const dynamic = "force-dynamic";
 
@@ -62,12 +64,42 @@ export const PUT = withAuth(async (session, req: Request) => {
       "En modo Meta hace falta el ID de la página"
     );
   }
-  if (data.source === "zernio" && !data.accountRef) {
-    return apiError(
-      422,
-      "invalid_body",
-      "En modo Zernio hace falta el accountId de la cuenta conectada"
-    );
+
+  const previa = await getMessengerCredentialsByOrg(session.organizationId);
+  // Sin secreto nuevo se conserva el que había: reconectar no debe apagar la
+  // verificación de firma.
+  const webhookSecret =
+    data.webhookSecret ??
+    (previa?.source === data.source ? previa.webhookSecret : null) ??
+    null;
+
+  if (data.source === "zernio") {
+    // 023: la cuenta se resuelve contra Zernio, no se guarda a ciegas. De ahí
+    // salen también la página y su nombre.
+    const cuenta = await resolveZernioAccount(data.token, data.accountRef, "messenger");
+    if (!cuenta.ok) return cuenta.response;
+    const pageName = zernioAccountName(cuenta.account);
+
+    await saveMessengerCredentials({
+      organizationId: session.organizationId,
+      source: "zernio",
+      pageId: cuenta.account.metadata?.selectedPageId ?? data.pageId ?? null,
+      pageName,
+      accountRef: cuenta.account._id,
+      token: data.token,
+      webhookSecret,
+    });
+    const webhook = await ensureWebhookForOrg(session.organizationId, {
+      secret: data.webhookSecret,
+    });
+    return Response.json({
+      ok: true,
+      pageName,
+      accountRef: cuenta.account._id,
+      accountName: pageName,
+      health: accountHealth(cuenta.account, "messenger"),
+      webhook,
+    });
   }
 
   const check = await verify(data);
@@ -75,12 +107,12 @@ export const PUT = withAuth(async (session, req: Request) => {
 
   await saveMessengerCredentials({
     organizationId: session.organizationId,
-    source: data.source,
+    source: "meta",
     pageId: data.pageId ?? null,
     pageName: check.pageName,
-    accountRef: data.accountRef ?? null,
+    accountRef: null,
     token: data.token,
-    webhookSecret: data.webhookSecret ?? null,
+    webhookSecret,
   });
 
   return Response.json({ ok: true, pageName: check.pageName });
@@ -94,16 +126,8 @@ type VerifyInput = Omit<z.infer<typeof putSchema>, "source"> & {
   source: "zernio" | "meta";
 };
 
+/** Fuente Meta. */
 async function verify(data: VerifyInput): Promise<Check> {
-  if (data.source === "zernio") {
-    try {
-      await verifyZernioToken(data.token);
-      return { ok: true, pageName: null };
-    } catch (err) {
-      return translate(err, "La API key de Zernio no es válida");
-    }
-  }
-
   // Meta: el token debe ser de ESA página. Un token de otra guardaría
   // credenciales que reciben webhooks de una y contestan por otra.
   try {

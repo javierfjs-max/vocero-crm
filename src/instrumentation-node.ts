@@ -1,8 +1,10 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
-import { getEnv } from "@/lib/env";
+import { mediaDirStatus } from "@/server/media-dir";
+import { leerConfigDespacho } from "@/server/brains/config";
+import { iniciarWorker, tanda } from "@/server/dispatch/worker";
+import { cifrarSecretosEnClaro } from "@/server/zernio/secreto-guardado";
+import { barrido, iniciarBarrido } from "@/server/webhooks/worker";
 
 /**
  * 008 — Aviso al arranque si MEDIA_DIR no es escribible. Sin esto, el primer
@@ -11,27 +13,29 @@ import { getEnv } from "@/lib/env";
  * conserve), con el EACCES enterrado en el log de un request. Se prueba
  * escribiendo de verdad (lo mismo que hará saveMediaFile) y nunca tumba el
  * arranque: el resto del CRM funciona sin adjuntos.
+ *
+ * El sondeo vive en `server/media-dir.ts` y es el mismo que `/api/health`
+ * expone como `mediaWritable` (#82): este resultado queda cacheado y el
+ * healthcheck lo reutiliza en vez de volver a escribir.
  */
 export async function checkMediaDir(): Promise<void> {
-  let dir: string;
-  try {
-    dir = path.resolve(getEnv().MEDIA_DIR);
-  } catch {
-    return; // entorno inválido: lo reporta, con detalle, el primer getEnv() de la app
-  }
-  const probe = path.join(dir, `.prueba-escritura-${process.pid}`);
-  try {
-    await mkdir(dir, { recursive: true });
-    await writeFile(probe, "");
-    await rm(probe, { force: true }).catch(() => {});
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException | null)?.code ?? String(err);
+  const media = await mediaDirStatus();
+  // Sin entorno válido no hay nada que sondear: lo reporta, con detalle, el
+  // primer getEnv() de la app.
+  if (!media || media.writable) return;
+  if (media.store === "bucket") {
+    // 037 — Sin decir el endpoint completo ni las llaves: solo el host.
     console.error(
-      `[boot] MEDIA_DIR=${dir} no es escribible (${code}): los adjuntos entrantes, el logo y el icono NO se van a poder guardar. ` +
-        "En Docker: monta un volumen persistente en /data (la imagen ya usa /data/media) y arranca el contenedor como root —el default—, " +
-        "que el entrypoint le da el volumen al usuario de la app. Fuera de Docker: apunta MEDIA_DIR a un directorio escribible."
+      `[boot] MEDIA_STORE=bucket pero el bucket${media.dir ? ` (${media.dir})` : ""} no acepta escrituras (${media.code}): los adjuntos, el logo y el icono se guardan en disco mientras tanto. ` +
+        "Revisa MEDIA_BUCKET_ENDPOINT, MEDIA_BUCKET_NAME, MEDIA_BUCKET_KEY_ID y MEDIA_BUCKET_SECRET, y que el bucket exista."
     );
+    return;
   }
+  console.error(
+    `[boot] MEDIA_DIR=${media.dir} no es escribible (${media.code}): los adjuntos entrantes, el logo y el icono NO se van a poder guardar. ` +
+      "En Docker: monta un volumen persistente en /data (la imagen ya usa /data/media) y arranca el contenedor como root —el default—, " +
+      "que el entrypoint le da el volumen al usuario de la app. Fuera de Docker: apunta MEDIA_DIR a un directorio escribible."
+  );
 }
 
 /**
@@ -59,4 +63,63 @@ export async function cleanupOrphanRuns(): Promise<void> {
     // La BD puede no estar lista aún (migraciones corren antes del server).
     console.error("[boot] limpieza de corridas huérfanas falló:", err);
   }
+}
+
+/**
+ * 030 — Cifra los secretos de firma de Zernio que una versión anterior guardó
+ * en claro. Va aquí y no en `migrate.mjs` porque cifrar necesita la
+ * `ENCRYPTION_KEY` validada y el mismo `encryptSecret` que el token, y porque
+ * así corre también con `next dev` (spec 030, D3). Nunca tumba el arranque:
+ * mientras una fila no esté cifrada, su secreto se sigue leyendo (D5).
+ */
+export async function encryptLegacySecrets(): Promise<void> {
+  try {
+    const cifrados = await cifrarSecretosEnClaro();
+    if (cifrados > 0) {
+      console.log(`[boot] ${cifrados} secreto(s) de firma de Zernio cifrado(s) en reposo`);
+    }
+  } catch (err) {
+    console.error(
+      "[boot] no se pudieron cifrar los secretos de firma de Zernio guardados en claro; se reintenta en el próximo arranque:",
+      err instanceof Error ? err.message : "error desconocido"
+    );
+  }
+}
+
+/**
+ * 021 — Reanuda el despacho al arrancar. Sin esto, un turno que quedó
+ * pendiente o a medio reintentar cuando el contenedor se reinició esperaría a
+ * que llegara OTRO mensaje para que alguien encendiera el worker.
+ *
+ * Solo con el despacho activo: una instancia sin cerebro no barre nada. Y lo
+ * mal configurado se dice aquí una vez, además de en la tarjeta «Quién
+ * responde»: es el log que alguien mira cuando el agente no contesta.
+ */
+export function resumeDispatch(): void {
+  const config = leerConfigDespacho();
+  if (config.active) {
+    iniciarWorker();
+    void tanda();
+    console.log(`[boot] despacho al cerebro activo → ${config.host}`);
+    return;
+  }
+  if (config.problem === "url") {
+    console.error(
+      "[boot] BRAIN_DISPATCH_URL no es una URL http:// o https:// válida (sin usuario:clave): el despacho al cerebro queda INACTIVO."
+    );
+  } else if (config.problem === "sin_llave") {
+    console.error(
+      "[boot] BRAIN_DISPATCH_URL está definida pero falta BOT_API_KEY (mínimo 16 caracteres): el despacho al cerebro queda INACTIVO."
+    );
+  }
+}
+
+/**
+ * 047 — Arranca el barrido de los eventos de webhook. Siempre: la ingesta es
+ * del núcleo. La primera pasada retoma lo que el reinicio dejó a medias (un
+ * evento en proceso cuya reserva venció, o uno pendiente de reintento).
+ */
+export function resumeWebhooks(): void {
+  iniciarBarrido();
+  void barrido();
 }

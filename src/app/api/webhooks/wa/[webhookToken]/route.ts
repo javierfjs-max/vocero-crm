@@ -1,18 +1,14 @@
-import { after } from "next/server";
 import { getEnv } from "@/lib/env";
-import {
-  isValidSignature,
-  isValidWebhookToken,
-  type WebhookPayload,
-} from "@/server/inbox/webhook";
-import { processEchoesValue, processMessagesValue } from "@/server/inbox/ingest";
-import { processTemplateStatusValue } from "@/server/whatsapp/template-events";
+import { isValidSignature, isValidWebhookToken } from "@/server/inbox/webhook";
+import { recibirEvento } from "@/server/webhooks/recibir";
 
 /**
  * Webhook público de WhatsApp (contrato webhook.md).
  * Capa 1: el segmento [webhookToken] debe coincidir (si no → 404 sin efectos).
  * Capa 2: firma x-hub-signature-256 solo si META_APP_SECRET está configurado.
- * El POST siempre responde 200 tras validar; el procesamiento va en after().
+ * 047: tras validar, el evento se guarda ANTES de responder 200 y se procesa
+ * fuera de la ruta; si falla, el barrido lo reintenta. Si no se pudo guardar,
+ * 503 para que Meta reintente (`src/server/webhooks/recibir.ts`).
  */
 export const dynamic = "force-dynamic";
 
@@ -49,38 +45,13 @@ export async function POST(req: Request, { params }: Params) {
     return new Response(null, { status: 401 });
   }
 
-  let payload: WebhookPayload;
+  let payload: unknown;
   try {
-    payload = JSON.parse(rawBody) as WebhookPayload;
+    payload = JSON.parse(rawBody);
   } catch {
     // body ilegible: 200 igualmente (Meta reintenta y termina desactivando)
     return Response.json({ received: true });
   }
 
-  after(async () => {
-    try {
-      await processPayload(payload);
-    } catch (err) {
-      console.error("[webhook] error procesando payload:", err);
-    }
-  });
-
-  return Response.json({ received: true });
-}
-
-async function processPayload(payload: WebhookPayload): Promise<void> {
-  for (const entry of payload.entry ?? []) {
-    for (const change of entry.changes ?? []) {
-      if (!change.value) continue;
-      if (change.field === "messages") {
-        await processMessagesValue(change.value);
-      } else if (change.field === "smb_message_echoes") {
-        // 008: mensajes enviados a mano desde la app del teléfono (coexistence)
-        await processEchoesValue(change.value);
-      } else if (change.field === "message_template_status_update") {
-        await processTemplateStatusValue(entry.id ?? null, change.value);
-      }
-      // otros fields: ignorar sin error
-    }
-  }
+  return recibirEvento("whatsapp", payload, rawBody, "webhook");
 }

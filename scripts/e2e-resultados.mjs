@@ -3,7 +3,9 @@
  * tests/e2e/us-resultados.md).
  *
  * Siembra por los caminos REALES —el webhook (wa-mock) con y sin `referral`,
- * la API del pipeline, el agente in-process contra el ai-mock, un envío que
+ * la API del pipeline, el agente (036: el cerebro falso de
+ * `scripts/lib/cerebro-falso.mjs` por el despacho, pensando por
+ * `/api/bot/llm` contra el ai-mock), un envío que
  * Meta rechaza, una corrida del Laboratorio— y compara lo que devuelve cada
  * bloque de `/api/analytics/*` contra lo sembrado.
  *
@@ -16,12 +18,15 @@
  * ventana por cerrarse, un prospecto del periodo anterior) y, con la bandera
  * AGENDA, citas con cada desenlace.
  *
- * Uso: pnpm test:e2e:resultados  (= node --env-file=.env scripts/e2e-resultados.mjs)
+ * Uso (configuración estándar de la 036, ver `scripts/lib/cerebro-falso.mjs`):
+ *   node --env-file=.env.e2e-036 scripts/e2e-resultados.mjs
  * Requiere: app viva con los mocks (WA_MOCK_ENABLED=true, META_GRAPH_BASE_URL →
- * wa-mock, OPENROUTER_BASE_URL → ai-mock), BOT_API_KEY y la BD migrada. Corre
- * con AGENDA apagada o encendida: lo lee del mismo entorno que la app.
+ * wa-mock, OPENROUTER_BASE_URL → ai-mock), BOT_API_KEY,
+ * BRAIN_DISPATCH_URL=http://127.0.0.1:3261/vocero/dispatch y la BD migrada.
+ * Corre con AGENDA apagada o encendida: lo lee del mismo entorno que la app.
  */
 import postgres from "postgres";
+import { apagarAgente, encenderAgente, levantarCerebroFalso } from "./lib/cerebro-falso.mjs";
 
 const BASE = process.env.APP_BASE_URL ?? "http://localhost:3000";
 const BOT_KEY = process.env.BOT_API_KEY ?? "";
@@ -170,14 +175,11 @@ async function main() {
   ok("conexión WhatsApp guardada (vía wa-mock)", conn.res.ok, JSON.stringify(conn.json));
   await api("/api/dev/wa-mock/outbox", { method: "DELETE" });
 
-  // El agente tiene que contestar; al final se deja como estaba.
-  const perfil = (await api("/api/agent/profile")).json?.profile;
-  const agenteEstaba = perfil?.enabled ?? false;
-  const encendido = await api("/api/agent/profile", {
-    method: "PUT",
-    body: JSON.stringify({ enabled: true }),
-  });
-  ok("agente encendido para la corrida", encendido.res.ok, JSON.stringify(encendido.json));
+  // El agente tiene que contestar: el cerebro falso, con el interruptor
+  // encendido. Al final se apaga (y se cierra el cerebro).
+  cerebro = await levantarCerebroFalso({ base: BASE, botKey: BOT_KEY });
+  const encendido = await encenderAgente(api);
+  ok("agente encendido para la corrida (contesta el cerebro falso)", encendido.res.ok, JSON.stringify(encendido.json));
 
   const board = (await api("/api/pipeline/board")).json;
   const abiertas = (board?.stages ?? [])
@@ -253,9 +255,8 @@ async function main() {
     siembra.filter(([n]) => !conv[n]).map(([n]) => n).join(",")
   );
 
-  // El modelo contesta a todos menos al que pidió un humano: a ése lo agarra
-  // el patrón de respaldo antes del modelo, le avisa que lo comunica con una
-  // persona y lo escala.
+  // El cerebro contesta a todos menos al que pidió un humano: a ése le
+  // avisa que lo comunica con una persona y lo traspasa (como Nea).
   const contestadas = await hasta(async () => {
     for (const [n] of siembra) {
       if (n === 6) continue;
@@ -556,16 +557,22 @@ async function main() {
     ok(`sin sesión, /api/analytics/${b} responde 401`, r.status === 401, `status=${r.status}`);
   }
 
-  if (!agenteEstaba) {
-    await api("/api/agent/profile", { method: "PUT", body: JSON.stringify({ enabled: false }) });
-  }
+  await cerrarCerebro();
   await sql.end();
   console.log(`\n===== ${checks - failures}/${checks} checks OK, ${failures} fallos =====`);
   process.exit(failures > 0 ? 1 : 0);
 }
 
+let cerebro = null;
+async function cerrarCerebro() {
+  if (cookie) await apagarAgente(api).catch(() => {});
+  await cerebro?.esperar().catch(() => {});
+  await cerebro?.apagar().catch(() => {});
+}
+
 main().catch(async (err) => {
   console.error(`\nError conduciendo el guion: ${err.stack ?? err.message}`);
+  await cerrarCerebro();
   await sql.end().catch(() => {});
   process.exit(1);
 });

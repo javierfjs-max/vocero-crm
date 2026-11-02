@@ -16,7 +16,9 @@ Diez personas escriben por el webhook del wa-mock: tres desde el anuncio R1
 (con creativo), una desde R2 (sin imagen), una desde una **publicación**, una
 que pide un humano, dos orgánicas, una dada de alta a mano como «referido» que
 luego escribe, y una que se lleva al periodo anterior. El agente contesta
-contra el ai-mock. Por la API del pipeline: una venta de $12,000, un trato
+(036: un cerebro por el despacho y `/api/bot/messages`; el CRM ya no trae
+agente que conteste contra el ai-mock), y el que pide un humano se traspasa
+por `POST /api/bot/handoff`. Por la API del pipeline: una venta de $12,000, un trato
 perdido por precio, otro ganado-sacado-y-vuelto-a-ganar ($5,000), otro ganado
 y devuelto al embudo, un monto de $3,000 en un trato abierto. Meta rechaza un
 envío (130472). Por SQL, solo lo que el webhook no puede fabricar: fechas en
@@ -40,9 +42,9 @@ anterior) y, con `AGENDA`, citas de cada desenlace más una de prueba.
    titular e imagen servida por `/api/media`; R2 = 1/1/1 sin imagen; la
    publicación tiene su fila marcada `post`. El `ctwa_clid` no sale.
 4. **El agente**: +9 conversaciones; «contestó el agente» sobre las 9 con
-   mensaje del cliente; +9 primeras respuestas medidas (también la escalada:
-   el aviso «te comunico con una persona del equipo» es respuesta del agente,
-   con origen IA); +1 «El cliente pidió un humano»; la ficha se mide
+   mensaje del cliente; +9 primeras respuestas medidas (también la escalada,
+   si el cerebro manda su aviso antes de traspasar: es respuesta con origen
+   IA); +1 «El cliente pidió un humano»; la ficha se mide
    sobre los contactos nuevos. Sin `AGENDA`: `sessions: null`. Con `AGENDA`:
    +4 citas (la de prueba no cuenta), +1 realizada, +1 no llegó, +1 cancelada,
    asistencia sobre las 2 con desenlace.

@@ -129,7 +129,7 @@ export const contact = pgTable(
      * 014: canal por el que vive este contacto. Aditivo y con default: toda
      * fila existente sigue significando exactamente lo mismo.
      */
-    channel: text("channel", { enum: ["whatsapp", "instagram", "messenger"] })
+    channel: text("channel", { enum: ["whatsapp", "instagram", "messenger", "tiktok"] })
       .notNull()
       .default("whatsapp"),
     /**
@@ -177,6 +177,17 @@ export const contact = pgTable(
     source: text("source", {
       enum: ["anuncio", "organico", "referido", "conocido", "otro"],
     }),
+    /**
+     * 027 — El agente no le responde a esta persona: clientes, miembros,
+     * proveedores — gente a la que el dueño quiere atender él mismo.
+     *
+     * Vive en el CONTACTO y no solo en la conversación porque un contacto
+     * importado todavía no tiene conversación (no se crean hilos vacíos), y
+     * porque al eliminar una conversación (026) la siguiente nacería con el
+     * agente encendido. La conversación lo hereda al crearse
+     * (`getOrCreateConversation`); después manda el interruptor de la Bandeja.
+     */
+    aiPaused: boolean("ai_paused").notNull().default(false),
     archivedAt: timestamp("archived_at"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
@@ -353,7 +364,7 @@ export const conversation = pgTable(
      * 014: canal de la conversacion. Denormalizado del contacto a proposito:
      * el ruteo de salida y el filtro de la bandeja lo leen en cada mensaje.
      */
-    channel: text("channel", { enum: ["whatsapp", "instagram", "messenger"] })
+    channel: text("channel", { enum: ["whatsapp", "instagram", "messenger", "tiktok"] })
       .notNull()
       .default("whatsapp"),
     /**
@@ -427,6 +438,11 @@ export const message = pgTable(
     mediaAssetId: text("media_asset_id").references(() => mediaAsset.id, {
       onDelete: "set null",
     }),
+    /**
+     * 039 — `wamid` del mensaje al que responde (cita). Sin FK: el citado
+     * puede no estar en el CRM; se resuelve al leer (`inbox/quotes.ts`).
+     */
+    replyToWaMessageId: text("reply_to_wa_message_id"),
     waTimestamp: timestamp("wa_timestamp"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
@@ -496,6 +512,12 @@ export const metaCredentials = pgTable(
       .notNull()
       .references(() => organization.id, { onDelete: "cascade" }),
     wabaId: text("waba_id").notNull(),
+    /**
+     * 065 — La Cuenta de mensajes del split de 2026: donde viven las
+     * plantillas y el método de pago. `waba_id` sigue siendo la Cuenta de
+     * WhatsApp (la del número). Nula = instancia de una sola ID, como antes.
+     */
+    messagingAccountId: text("messaging_account_id"),
     phoneNumberId: text("phone_number_id").notNull(),
     displayPhoneNumber: text("display_phone_number"),
     verifiedName: text("verified_name"),
@@ -539,8 +561,16 @@ export const instagramCredentials = pgTable(
     tokenCipher: text("token_cipher").notNull(),
     tokenIv: text("token_iv").notNull(),
     tokenTag: text("token_tag").notNull(),
-    /** Secreto HMAC de las entregas (Zernio); null en modo Meta. */
+    /**
+     * 030 — Obsoleta: el secreto iba en claro. Nada la escribe; el arranque
+     * la cifra en las columnas de abajo y la deja en nulo. Se quita en una
+     * versión mayor (spec 030, D6).
+     */
     webhookSecret: text("webhook_secret"),
+    /** 030 — Secreto HMAC de las entregas de Zernio, cifrado como el token. */
+    webhookSecretCipher: text("webhook_secret_cipher"),
+    webhookSecretIv: text("webhook_secret_iv"),
+    webhookSecretTag: text("webhook_secret_tag"),
     status: text("status", { enum: ["connected", "reconnect_required"] })
       .notNull()
       .default("connected"),
@@ -583,8 +613,16 @@ export const messengerCredentials = pgTable(
     tokenCipher: text("token_cipher").notNull(),
     tokenIv: text("token_iv").notNull(),
     tokenTag: text("token_tag").notNull(),
-    /** Secreto HMAC de las entregas (Zernio); null en modo Meta. */
+    /**
+     * 030 — Obsoleta: el secreto iba en claro. Nada la escribe; el arranque
+     * la cifra en las columnas de abajo y la deja en nulo. Se quita en una
+     * versión mayor (spec 030, D6).
+     */
     webhookSecret: text("webhook_secret"),
+    /** 030 — Secreto HMAC de las entregas de Zernio, cifrado como el token. */
+    webhookSecretCipher: text("webhook_secret_cipher"),
+    webhookSecretIv: text("webhook_secret_iv"),
+    webhookSecretTag: text("webhook_secret_tag"),
     status: text("status", { enum: ["connected", "reconnect_required"] })
       .notNull()
       .default("connected"),
@@ -595,6 +633,51 @@ export const messengerCredentials = pgTable(
     uniqueIndex("messenger_credentials_org_uq").on(t.organizationId),
     uniqueIndex("messenger_credentials_page_uq").on(t.pageId),
     index("messenger_credentials_account_ref_idx").on(t.accountRef),
+  ]
+);
+
+/**
+ * 022 — Credenciales del canal de TikTok.
+ *
+ * TikTok no abre su API de mensajes a una app propia como hace Meta: llega por
+ * la API unificada de Zernio. `source` existe, con un solo valor, para que una
+ * fuente futura no pida otra migración (mismo patrón que
+ * `messenger_credentials`).
+ */
+export const tiktokCredentials = pgTable(
+  "tiktok_credentials",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    source: text("source", { enum: ["zernio"] }).notNull().default("zernio"),
+    /** `accountId` de la cuenta en Zernio: por él enruta el webhook. */
+    accountRef: text("account_ref").notNull(),
+    /** Usuario de TikTok, solo para enseñarlo en Ajustes. */
+    username: text("username"),
+    tokenCipher: text("token_cipher").notNull(),
+    tokenIv: text("token_iv").notNull(),
+    tokenTag: text("token_tag").notNull(),
+    /**
+     * 030 — Obsoleta: el secreto iba en claro. Nada la escribe; el arranque
+     * la cifra en las columnas de abajo y la deja en nulo. Se quita en una
+     * versión mayor (spec 030, D6).
+     */
+    webhookSecret: text("webhook_secret"),
+    /** 030 — Secreto HMAC de las entregas de Zernio, cifrado como el token. */
+    webhookSecretCipher: text("webhook_secret_cipher"),
+    webhookSecretIv: text("webhook_secret_iv"),
+    webhookSecretTag: text("webhook_secret_tag"),
+    status: text("status", { enum: ["connected", "reconnect_required"] })
+      .notNull()
+      .default("connected"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tiktok_credentials_org_uq").on(t.organizationId),
+    uniqueIndex("tiktok_credentials_account_ref_uq").on(t.accountRef),
   ]
 );
 
@@ -611,6 +694,13 @@ export const agentProfile = pgTable(
     instructions: text("instructions"),
     escalationRules: text("escalation_rules"),
     greeting: text("greeting"),
+    /** 034 — El rol del agente (`src/lib/agent-roles.ts`). */
+    role: text("role").notNull().default("calificador"),
+    /**
+     * 034 — Las herramientas encendidas, por clave del catálogo. `null` =
+     * todas: lo que tiene una instalación que actualiza.
+     */
+    tools: jsonb("tools").$type<string[]>(),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
@@ -903,7 +993,7 @@ export const agentTestCase = pgTable(
     veredicto: text("veredicto", { enum: ["verde", "amarillo", "rojo"] }),
     hallazgos: jsonb("hallazgos"),
     status: text("status", {
-      enum: ["pending", "running", "done", "judge_failed"],
+      enum: ["pending", "running", "done", "judge_failed", "agent_failed"],
     })
       .notNull()
       .default("pending"),
@@ -1057,4 +1147,257 @@ export const capiSettings = pgTable(
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
   (t) => [uniqueIndex("capi_settings_org_uq").on(t.organizationId)]
+);
+
+/* ============================================================
+ * Proveedor de IA (Ajustes → IA)
+ * ============================================================ */
+
+/**
+ * Credencial del proveedor de IA de la organización (puerto de `ai_credentials`
+ * de Vocero Cloud, issue #85). Una fila por organización: proveedor (su
+ * `base_url` OpenAI-compatible), modelo y token cifrado con los mismos helpers
+ * que el de WhatsApp; hacia fuera solo `token_last4`.
+ *
+ * `status` lo escribe el adaptador según lo que respondió QUIEN COBRA: 401 →
+ * `paused_invalid_token`, 402 → `paused_no_credit`. Un 429 o un 500 no pausan
+ * (ver `server/ai/credentials.ts`). Guardar un token nuevo vuelve a `active`.
+ *
+ * Sin fila, el adaptador cae a las variables `OPENROUTER_*` del entorno
+ * (respaldo para instalaciones automatizadas); con fila, la fila manda.
+ */
+export const aiCredentials = pgTable(
+  "ai_credentials",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    /** Preset de la UI; `base_url` es lo que de verdad identifica al proveedor. */
+    provider: text("provider", { enum: ["openrouter", "openai_compatible"] })
+      .notNull()
+      .default("openrouter"),
+    baseUrl: text("base_url").notNull(),
+    model: text("model").notNull(),
+    tokenCipher: text("token_cipher").notNull(),
+    tokenIv: text("token_iv").notNull(),
+    tokenTag: text("token_tag").notNull(),
+    /** Lo ÚNICO del token que puede salir hacia el cliente. */
+    tokenLast4: text("token_last4").notNull(),
+    status: text("status", {
+      enum: ["active", "paused_invalid_token", "paused_no_credit"],
+    })
+      .notNull()
+      .default("active"),
+    statusReason: text("status_reason"),
+    statusChangedAt: timestamp("status_changed_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("ai_credentials_org_uq").on(t.organizationId)]
+);
+
+/* ============================================================
+ * 021 — Despacho al cerebro
+ * ============================================================ */
+
+/**
+ * El outbox del despachador (spec 021): los turnos que el CRM le empuja a un
+ * cerebro externo. El mensaje ya está en `message` antes de que exista una
+ * fila aquí: bandeja primero, cerebro después.
+ *
+ * Misma tabla, columnas y estados que `dispatch` de Vocero Cloud, sin lo que
+ * allá es de la plataforma (`brain_generation`, `expires_at`, `brain_kind`,
+ * `responded_message_id`).
+ */
+export const dispatch = pgTable(
+  "dispatch",
+  {
+    /** Es el `dispatchId` que viaja al cerebro: la clave de idempotencia. */
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversation.id, { onDelete: "cascade" }),
+    status: text("status", {
+      enum: [
+        "pendiente",
+        "en_vuelo",
+        "entregado",
+        "caducado_a_humano",
+        "descartado",
+      ],
+    })
+      .notNull()
+      .default("pendiente"),
+    /** Sube al tomar la fila: distingue a dos dueños de un mismo lease. */
+    attempts: integer("attempts").notNull().default(0),
+    /**
+     * La ventana de agrupado: cada mensaje nuevo de la conversación la empuja
+     * hacia adelante. El worker solo toma filas cuyo `not_before` ya venció,
+     * así que una ráfaga se junta sola.
+     */
+    notBefore: timestamp("not_before").notNull().defaultNow(),
+    firstMessageAt: timestamp("first_message_at").notNull(),
+    lastMessageAt: timestamp("last_message_at").notNull(),
+    leasedUntil: timestamp("leased_until"),
+    /**
+     * 025 — Los entrantes que este despacho le DEBE al cerebro: los que lo
+     * encolaron o lo extendieron.
+     *
+     * La ráfaga se delimita por el último saliente, y eso confunde «sin
+     * responder» con «sin entregar»: lo que el cliente escribe mientras el
+     * cerebro piensa queda DETRÁS de su respuesta. Con los ids anotados, ese
+     * mensaje viaja aunque ya haya una respuesta después de él. Nulo en filas
+     * anteriores a esta columna, que se comportan como antes.
+     */
+    messageIds: jsonb("message_ids").$type<string[]>(),
+    /** Motivo del último fallo. Nunca el cuerpo firmado ni la llave. */
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    /**
+     * La pieza central de esta tabla: como máximo UN despacho vivo por
+     * conversación. De aquí salen el agrupado de ráfagas y el orden, y
+     * sobreviven a que alguien reescriba el worker, porque la garantía la da
+     * Postgres y no la lógica.
+     */
+    uniqueIndex("dispatch_conversation_vivo_uq")
+      .on(t.conversationId)
+      .where(sql`${t.status} in ('pendiente', 'en_vuelo')`),
+    /**
+     * La tarjeta «Quién responde» pregunta por el último entregado y el último
+     * fallido. Con `updated_at` en el índice esa pregunta cuesta lo mismo con
+     * cien filas que con un millón; sin él, cada refresco ordenaba todo el
+     * histórico. (En Vocero Cloud es `dispatch_org_status_idx`, sin la tercera
+     * columna: este es su superconjunto.)
+     */
+    index("dispatch_org_status_updated_idx").on(
+      t.organizationId,
+      t.status,
+      t.updatedAt
+    ),
+    // La consulta del worker: pendientes cuya ventana ya venció.
+    index("dispatch_status_notbefore_idx").on(t.status, t.notBefore),
+  ]
+);
+
+/* ============================================================
+ * 047 — Eventos de webhook guardados antes de procesarse
+ * ============================================================ */
+
+/**
+ * El cuerpo de cada entrega de Meta o Zernio, tal como llegó, guardado ANTES
+ * de acusar recibo. Si procesarlo falla, el barrido lo reintenta con espera
+ * creciente (`src/server/webhooks/`); si no se pudo ni guardar, la ruta
+ * responde 503 y reintenta quien lo mandó.
+ *
+ * Trae datos del cliente: se borra a los 7 días de procesado y a los 30 de
+ * agotado, y nunca sale a la API ni a los logs.
+ */
+export const webhookEvent = pgTable(
+  "webhook_event",
+  {
+    id: text("id").primaryKey(),
+    /** Resuelto al recibir, con las mismas credenciales que usa la ingesta. */
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    /** Quién lo procesa: el adaptador del canal y la fuente. */
+    fuente: text("fuente", {
+      enum: ["whatsapp", "meta_instagram", "meta_messenger", "zernio"],
+    }).notNull(),
+    payload: jsonb("payload").notNull(),
+    /** SHA-256 del cuerpo crudo: la misma entrega dos veces es una fila. */
+    huella: text("huella").notNull(),
+    status: text("status", {
+      enum: ["pendiente", "en_proceso", "procesado", "agotado"],
+    })
+      .notNull()
+      .default("pendiente"),
+    /** Sube al reclamar: distingue a dos dueños de una misma reserva. */
+    attempts: integer("attempts").notNull().default(0),
+    notBefore: timestamp("not_before").notNull().defaultNow(),
+    leasedUntil: timestamp("leased_until"),
+    /** El mensaje de la excepción, recortado. Nunca el cuerpo. */
+    lastError: text("last_error"),
+    processedAt: timestamp("processed_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("webhook_event_huella_uq").on(t.huella),
+    // El barrido solo lee lo vivo: con el índice parcial, una tabla llena de
+    // procesados no lo hace más lento.
+    index("webhook_event_barrido_idx")
+      .on(t.status, t.notBefore)
+      .where(sql`${t.status} in ('pendiente', 'en_proceso')`),
+    // Los conteos de Ajustes → WhatsApp.
+    index("webhook_event_org_status_idx").on(t.organizationId, t.status),
+  ]
+);
+
+/* ============================================================
+ * 049 — Respuestas rápidas («/atajo» en el compositor)
+ * ============================================================ */
+
+/**
+ * Textos que el equipo inserta con `/atajo` en vez de teclearlos otra vez
+ * (horario, pago, envío…). Compartidas por la organización: las administra
+ * quien configura y las usa cualquiera. No son plantillas de Meta: solo sirven
+ * con la ventana abierta.
+ */
+export const quickReply = pgTable(
+  "quick_reply",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    /** Normalizado: minúsculas, sin acentos, `[a-z0-9_-]{1,32}`. */
+    atajo: text("atajo").notNull(),
+    /** Hasta 4 096 caracteres (el tope de WhatsApp). Admite `{nombre}`. */
+    texto: text("texto").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("quick_reply_org_atajo_uq").on(t.organizationId, t.atajo)]
+);
+
+/* ============================================================
+ * 050 — Notas internas en el hilo
+ * ============================================================ */
+
+/**
+ * Lo que el equipo se anota dentro de una conversación y el cliente nunca ve.
+ *
+ * Tabla propia A PROPÓSITO, no un tipo de `message`: el envío a Meta, el
+ * despacho al cerebro, «sin responder», la ventana y las métricas leen
+ * `message`, y así ninguno puede tocar una nota por descuido. Una prueba
+ * vigila que esas rutas no la mencionen.
+ */
+export const conversationNote = pgTable(
+  "conversation_note",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversation.id, { onDelete: "cascade" }),
+    /** Si se borra la cuenta, la nota queda («Alguien del equipo»). */
+    authorUserId: text("author_user_id").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    texto: text("texto").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("conversation_note_conv_idx").on(t.organizationId, t.conversationId, t.createdAt),
+  ]
 );

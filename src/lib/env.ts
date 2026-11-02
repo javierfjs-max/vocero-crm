@@ -8,7 +8,7 @@ import { z } from "zod";
  * que en esa fase se aceptan placeholders — los valores reales llegan al boot.
  */
 
-const envSchema = z.object({
+export const envSchema = z.object({
   APP_BASE_URL: z.string().url(),
   DATABASE_URL: z.string().min(1),
   BETTER_AUTH_SECRET: z.string().min(16),
@@ -20,6 +20,11 @@ const envSchema = z.object({
     }),
   META_WEBHOOK_VERIFY_TOKEN: z.string().min(8),
   META_APP_SECRET: z.string().optional(),
+  // 066: «Conectar con Meta» (Embedded Signup v4) en Ajustes → WhatsApp. Con
+  // las dos y META_APP_SECRET (el de ESA app) aparece el botón; sin ellas,
+  // solo el alta manual. Se leen en server/whatsapp/embedded.ts.
+  META_APP_ID: z.string().optional(),
+  META_EMBEDDED_CONFIG_ID: z.string().optional(),
   META_GRAPH_API_VERSION: z.string().default("v25.0"),
   META_GRAPH_BASE_URL: z.string().url().default("https://graph.facebook.com"),
   OPENROUTER_API_TOKEN: z.string().optional(),
@@ -61,8 +66,26 @@ const envSchema = z.object({
   // validaba y todo respondía 503). La tarjeta la marca como problema de
   // configuración y lo demás sigue funcionando (server/bot/status.ts).
   BRAIN_HEALTH_URL: z.string().optional(),
-  // 008: volumen local de adjuntos (constitución II: sin S3/R2).
+  // 021: a dónde le despacha el CRM cada turno al cerebro externo. Ej.:
+  // http://nea:8000/vocero/dispatch. Con ella, `BOT_API_KEY` y el interruptor
+  // del Agente encendido, contesta el cerebro (036). Tampoco se valida aquí,
+  // por lo mismo que la de arriba: mal escrita, el despacho queda inactivo y
+  // la tarjeta lo dice (server/brains/config.ts).
+  BRAIN_DISPATCH_URL: z.string().optional(),
+  // 008: volumen local de adjuntos. Es el camino por defecto y el de respaldo
+  // del bucket (037).
   MEDIA_DIR: z.string().default("./.dev-media"),
+  // 037: conector opcional (constitución II.3). `bucket` escribe los adjuntos,
+  // el logo y el icono en un S3-compatible propio; se leen siempre de los dos
+  // sitios (src/lib/storage/medios.ts). Las MEDIA_BUCKET_* no se validan aquí,
+  // por lo mismo que BRAIN_HEALTH_URL: mal escritas, se escribe en disco y
+  // `pnpm doctor` y /api/health lo dicen, en vez de tumbar el CRM entero.
+  MEDIA_STORE: z.string().default("disco"),
+  MEDIA_BUCKET_ENDPOINT: z.string().optional(),
+  MEDIA_BUCKET_NAME: z.string().optional(),
+  MEDIA_BUCKET_REGION: z.string().default("auto"),
+  MEDIA_BUCKET_KEY_ID: z.string().optional(),
+  MEDIA_BUCKET_SECRET: z.string().optional(),
   NODE_ENV: z.string().default("development"),
 });
 
@@ -78,15 +101,24 @@ const BUILD_PLACEHOLDERS: Record<string, string> = {
 
 let cached: Env | null = null;
 
+/**
+ * Valida un entorno contra el esquema SIN lanzar ni cachear. Es lo que usa
+ * `getEnv()` y también `pnpm doctor` (scripts/doctor.ts): un solo esquema y
+ * una sola regla para los strings vacíos, que cuentan como ausentes porque
+ * los compose/paneles suelen inyectar VAR="" para opcionales y eso debe
+ * activar los defaults.
+ */
+export function safeParseEnv(source: Record<string, string | undefined>) {
+  return envSchema.safeParse(stripEmpty(source));
+}
+
 export function getEnv(): Env {
   if (cached) return cached;
   const isBuild = process.env.NEXT_PHASE === "phase-production-build";
-  // Los strings vacíos cuentan como ausentes: los compose/paneles suelen
-  // inyectar VAR="" para opcionales y eso debe activar los defaults.
   const source = isBuild
     ? { ...BUILD_PLACEHOLDERS, ...stripEmpty(process.env) }
-    : stripEmpty(process.env);
-  const parsed = envSchema.safeParse(source);
+    : process.env;
+  const parsed = safeParseEnv(source);
   if (!parsed.success) {
     const missing = parsed.error.issues
       .map((i) => `${i.path.join(".")}: ${i.message}`)
@@ -100,7 +132,7 @@ export function getEnv(): Env {
   return cached;
 }
 
-function stripEmpty(env: NodeJS.ProcessEnv): Record<string, string> {
+function stripEmpty(env: Record<string, string | undefined>): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(env)) {
     if (v !== undefined && v !== "") out[k] = v;
@@ -116,8 +148,13 @@ export function isMockEnabled(): boolean {
   );
 }
 
-/** true si hay proveedor de IA configurado (token presente y no vacío). */
-export function isAiConfigured(): boolean {
+/**
+ * true si el ENTORNO trae proveedor de IA (`OPENROUTER_API_TOKEN` presente y
+ * no vacío). Es solo el respaldo: lo que decide si una organización tiene IA
+ * es `isAiConfiguredFor()` en `lib/ai/provider.ts`, que mira primero lo
+ * guardado en Ajustes → IA.
+ */
+export function isAiConfiguredByEnv(): boolean {
   const token = process.env.OPENROUTER_API_TOKEN;
   return typeof token === "string" && token.trim().length > 0;
 }

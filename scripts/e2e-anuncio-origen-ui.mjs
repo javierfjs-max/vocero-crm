@@ -82,12 +82,12 @@ try {
   console.log("== Setup ==");
   let r = await req.post(`${BASE}/api/auth/sign-up/email`, {
     headers: { origin: BASE },
-    data: { email: "e2e@vocero.test", password: "password-e2e-123", name: "Operador E2E" },
+    data: { email: process.env.E2E_EMAIL ?? "e2e@vocero.test", password: process.env.E2E_PASSWORD ?? "password-e2e-123", name: "Operador E2E" },
   });
   if (!r.ok())
     r = await req.post(`${BASE}/api/auth/sign-in/email`, {
       headers: { origin: BASE },
-      data: { email: "e2e@vocero.test", password: "password-e2e-123" },
+      data: { email: process.env.E2E_EMAIL ?? "e2e@vocero.test", password: process.env.E2E_PASSWORD ?? "password-e2e-123" },
     });
   ok("login", r.ok());
   await req.put(`${BASE}/api/settings/whatsapp`, {
@@ -183,9 +183,12 @@ try {
       "la conversación orgánica no lleva marca",
       (await fila(page, ORGANICO).getByText("Anuncio ·", { exact: false }).count()) === 0
     );
-    const filtro = page.getByRole("button", { name: /^Anuncios/ });
-    ok("hay filtro «Anuncios»", (await filtro.count()) === 1);
-    await filtro.click();
+    // 052 (enmienda): «De anuncios» es una casilla del menú «Filtrar».
+    await page.getByRole("button", { name: /^Filtrar/ }).click();
+    const filtro = page.getByRole("checkbox", { name: /De anuncios/ });
+    ok("hay filtro «De anuncios»", (await filtro.count()) === 1);
+    await filtro.check();
+    await page.keyboard.press("Escape");
     await fila(page, CON_ANUNCIO).waitFor();
     ok(
       "el filtro deja solo las de anuncios",
@@ -216,7 +219,7 @@ try {
     await fila(page, CON_VIDEO).click();
     await tarjeta(page).getByText(TITULAR_VIDEO, { exact: true }).waitFor();
     ok("un anuncio de video lo dice en la tarjeta", (await tarjeta(page).getByText("con video", { exact: false }).count()) === 1);
-    await page.getByRole("button", { name: /^Todas/ }).click();
+    await page.getByRole("button", { name: "Quitar filtro De anuncios" }).click();
     await fila(page, ORGANICO).click();
     await page.waitForResponse((res) => res.url().includes("/api/contacts/") && res.ok());
     await sleep(500);
@@ -235,7 +238,7 @@ try {
     await page.setViewportSize(PHONE);
     await page.goto(`${BASE}/inbox`, { waitUntil: "domcontentloaded" });
     await fila(page, CON_ANUNCIO).getByText(`Anuncio · ${TITULAR}`).waitFor();
-    await page.getByRole("button", { name: /^Anuncios/ }).waitFor();
+    await page.getByRole("button", { name: /^Filtrar/ }).waitFor();
     ok("a 390 px la bandeja no se desborda", !(await desborda(page)));
     await captura(page, `bandeja-${tema}-390.png`);
     await fila(page, CON_ANUNCIO).click();

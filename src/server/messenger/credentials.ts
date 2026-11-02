@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
 import { newId } from "@/lib/db/ids";
 import { decryptSecret, encryptSecret } from "@/lib/crypto";
+import { columnasDelSecreto, secretoDeLaFila } from "@/server/zernio/secreto-guardado";
 
 /**
  * 017 — Credenciales del canal de Messenger.
@@ -36,7 +37,7 @@ function toCredentials(row: Row): MessengerCredentials {
     pageId: row.pageId,
     pageName: row.pageName,
     accountRef: row.accountRef,
-    webhookSecret: row.webhookSecret,
+    webhookSecret: secretoDeLaFila(row),
     status: row.status,
     token: decryptSecret({
       cipher: row.tokenCipher,
@@ -103,7 +104,7 @@ export async function saveMessengerCredentials(input: {
     tokenCipher: enc.cipher,
     tokenIv: enc.iv,
     tokenTag: enc.tag,
-    webhookSecret: input.webhookSecret,
+    ...columnasDelSecreto(input.webhookSecret),
     status: "connected" as const,
     updatedAt: new Date(),
   };

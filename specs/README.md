@@ -16,6 +16,34 @@ producto** — y saberlo antes de leerla ahorra una confusión.
 | `017-canal-messenger` | Ciclo completo | spec (sobre los cimientos de 014: mismo adaptador-por-canal y bandera) |
 | `018-anuncio-de-origen` | Ciclo completo | spec, plan, data-model, tasks (puerto de la spec 212 de Vocero Cloud; enmienda la captura de 016) |
 | `019-resultados` | Ligero | spec (puerto de la pantalla Resultados de Vocero Cloud, sin gasto publicitario ni migración) |
+| `020-token-ia-ui` | Ligero, con el modelo de datos dentro | spec (puerto de `ai_credentials` de Vocero Cloud, #85: Ajustes → IA, migración aditiva `0015`, sin registro de llamadas) |
+| `021-despacho-estandar` | Ciclo completo | spec, plan, data-model, 1 contrato, tasks (#89: el CRM le despacha cada turno al cerebro; puerto del despachador de Vocero Cloud, migración aditiva `0016`) |
+| `022-canal-tiktok` | Ciclo completo | spec, plan, tasks (TikTok por Zernio sobre los cimientos de 014 y 017; migración aditiva `0018`; la ventana y los límites pasan a declararse por canal) |
+| `023-ajustes-canales` | Ligero | spec (pantalla de Instagram, Ajustes → Estado, la cuenta de Zernio resuelta contra la llave, un secreto de firma para todos los canales y el webhook dado de alta por el CRM; puerto de cuatro arreglos de un CRM de cliente, sin migración) |
+| `024-texto-social-ventana-humana` | Ligero | spec (el texto de la IA sale sin formato en redes; la ventana humana de 7 días de Instagram y Messenger pasa a ser una capacidad del canal con una sola puerta; puerto de dos specs de un CRM de cliente, sin migración) |
+| `026-eliminar-conversacion` | Ciclo completo | spec, plan, tasks (eliminar una conversación o el contacto entero y pedirle al cerebro que la olvide; puerto de Vocero Cloud #106; sin migración, enmienda el contrato del 021 con el evento `conversation.deleted`) |
+| `028-pulido-visual` | Ligero | spec (el compositor solo ofrece lo que el canal manda; bandeja vacía y filtro por canal; «multicanal» en menú, pestaña y entrada; un compositor por conversación) |
+| `029-agente-no-calla` | Ligero | spec (el agente incluido contesta saludos y «hola, prueba»; solo calla ante un cierre; recordatorio de formato al final del turno; `pnpm eval:silencios` mide contra el modelo real) |
+| `027-importar-contactos` | Ligero, con el modelo de datos dentro | spec (importar un CSV de contactos con vista previa y marcar contactos «sin agente»; puerto de Vocero Cloud #108, migración aditiva `0019`) |
+| `030-secreto-zernio-cifrado` | Ciclo completo | spec, plan, tasks (el secreto de firma de Zernio de los tres canales sociales pasa a AES-256-GCM; migración aditiva `0020` y los secretos ya guardados se cifran al arrancar la app) |
+| `025-despacho-recuerda` | Ciclo completo | spec, plan, tasks (el despacho anota qué mensajes debe; puerto de Vocero Cloud #111, #116 y #117, migración aditiva `0017`; enmienda el contrato del 021) |
+| `046-referencias-2.2` | Exento (estudio) | research (lo que se aprendió de siete CRM y bandejas open source, licencias verificadas, ranking y plan de la 2.2; la elección de Kevin) |
+| `047-webhook-a-prueba-de-fallos` | Ciclo completo | spec, plan, tasks (el evento del webhook se guarda antes del 200 y se reintenta si falla; migración aditiva `0023`; enmienda el contrato del webhook: 503 si no se pudo guardar) |
+| `048-pwa` | Ligero | spec (Vocero instalable en el celular con la marca de la organización: manifest, iconos PNG con `next/og`, service worker que no guarda nada y botón «Instalar app»; sin Web Push) |
+| `049-respuestas-rapidas` | Ciclo completo | spec, plan, tasks (respuestas rápidas con «/» en el compositor, administradas en Ajustes; migración aditiva `0024`) |
+| `050-notas-internas` | Ciclo completo | spec, plan, tasks (notas internas en el hilo, en su propia tabla; migración aditiva `0025`; enmienda el contrato SSE con `note.new` y `note.deleted`) |
+| `051-borrador-por-conversacion` | Ligero | spec (lo escrito en una conversación vuelve al regresar; en el navegador, se borra al enviar, a los 7 días y al cerrar sesión) |
+| `061-diseno-tarjetas` | Ligero | spec (diseño de tarjetas inspirado en la referencia 6: marco, riel de iconos, Bandeja en tarjetas, cliente en burbuja oscura, compositor en cápsula; tema Menta / Noche) |
+| `062-apariencia` | Ligero | spec (Ajustes → Apariencia: temas listos, tema propio, letra, tamaño y densidad; predeterminado del negocio y elección por persona) |
+| `063-fondo-chat-dibujos` | Ligero | spec (fondo del chat con dibujos a la WhatsApp, con el carnero, el pulpo, el plato de DJ y la diosa de AISHIA; Alto contraste sin dibujos) |
+| `064-lista-conversaciones-rapida` | Ligero | spec (la vista previa de la lista usa el índice de `message` y una ráfaga de mensajes recarga la lista una vez por pestaña, no cuatro; menú y Ctrl+K toman la lista de la Bandeja; sin migración) |
+| `065-cuenta-de-mensajes` | Ciclo completo | spec, plan, tasks, migrar (el split de Meta de 2026: se guarda también la Cuenta de mensajes, las plantillas se crean y sincronizan ahí y el webhook se registra en las dos; el sync importa `hello_world` y las creadas fuera de Vocero; migración aditiva `0026`) |
+| `066-embedded-signup` | Ciclo completo | spec, plan, tasks («Conectar con Meta»: Embedded Signup v4 en Ajustes → WhatsApp con `META_APP_ID` + `META_EMBEDDED_CONFIG_ID` + `META_APP_SECRET`; canje del code, registro del número con PIN, webhook en las dos cuentas; `2388339` en la cuenta de WhatsApp ya no es fatal; sin migración; sin coexistencia) |
+| `055-atajos-de-teclado` | Ligero | spec (Ctrl+K para ir a una pantalla o conversación, «?» para la ayuda; Alt+J/K, «/», Alt+R y Alt+N en la Bandeja) |
+| `054-eventos-en-el-hilo` | Ligero | spec (cambios de etapa y traspaso a una persona pintados en el hilo, con lo que ya se guarda; `GET …/eventos`) |
+| `056-avisos-y-sin-conexion` | Ligero | spec (avisos del sistema con Vocero oculto, sin push; banda «sin conexión» y reconexión del SSE con espera creciente) |
+| `059-reenviar-y-deslizar` | Ligero | spec (reenviar cualquier mensaje con `POST …/messages/forward`; en el celular, deslizar para responder y mantener presionado para el menú) |
+| `052-filtros-ventana` | Ligero | spec (filtro «Por vencer» con el chip «Vence en…»; enmienda del 2026-10-23: «Todas | No leídas» y un solo botón «Filtrar», sin «Sin responder») |
 
 Los tres carriles —ciclo completo, ligero y exento— están definidos en el
 [Principio VI de la constitución](../.specify/memory/constitution.md). El

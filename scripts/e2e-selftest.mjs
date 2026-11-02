@@ -3,14 +3,34 @@
  * mocks (wa-mock + ai-mock) por las superficies de usuario, en vez de darle
  * el guion al humano. Cubre tests/e2e/us-bsuid.md y tests/e2e/us-bot-api.md.
  *
- * Uso:
- *   1) app corriendo con WA_MOCK_ENABLED=true, META_GRAPH_BASE_URL → wa-mock,
- *      BOT_API_KEY configurada y BD migrada
- *   2) node --env-file=.env scripts/e2e-selftest.mjs
+ * 036 — El CRM ya no trae agente. Donde antes se encendía el agente incluido
+ * y se esperaba su respuesta, ahora contesta el cerebro falso compartido
+ * (`scripts/lib/cerebro-falso.mjs`), que escucha en `BRAIN_DISPATCH_URL`,
+ * sirve su `/health`, piensa por el proxy `/api/bot/llm` (el ai-mock) y
+ * contesta por `/api/bot/*`; y el interruptor del Agente se enciende con él
+ * sano. Lo que solo existía dentro del agente incluido (el patrón de
+ * respaldo de «humano», la reserva desde el prompt, el aviso
+ * `doble_respuesta`) se quitó o se reescribió contra el cerebro; cada sitio
+ * lo dice.
+ *
+ * Uso (configuración estándar de la 036, ver `scripts/lib/cerebro-falso.mjs`):
+ *   1) app corriendo (`pnpm dev`) con WA_MOCK_ENABLED=true,
+ *      META_GRAPH_BASE_URL → wa-mock, OPENROUTER_BASE_URL → ai-mock (+ token y
+ *      modelo), BOT_API_KEY, AGENT_COALESCE_MS=1500, AGENDA=on,
+ *      BRAIN_DISPATCH_URL=http://127.0.0.1:3261/vocero/dispatch (sin
+ *      BRAIN_HEALTH_URL) y BD migrada
+ *   2) node --env-file=.env.e2e-036 scripts/e2e-selftest.mjs
  *
  * Sale con código 1 si algún check falla (apto para CI o para el gate previo
  * a declarar "Hecho").
  */
+import {
+  ACUSE_TRASPASO,
+  apagarAgente,
+  encenderAgente,
+  levantarCerebroFalso,
+  urlDelDespacho,
+} from "./lib/cerebro-falso.mjs";
 
 const BASE = process.env.APP_BASE_URL ?? "http://localhost:3000";
 const BOT_KEY = process.env.BOT_API_KEY;
@@ -76,10 +96,21 @@ async function hasta(cond, ms = 15000, paso = 400) {
   }
 }
 const PN = "PN-E2E-1";
-// La ingesta dedupe por wa_message_id (constitución IV): un wamid fijo haría
-// que en re-corridas contra la misma BD el mensaje no se re-ingiera y sus
-// efectos (p. ej. la pausa por manual_reply) no se re-apliquen.
-const RUN = Date.now().toString(36);
+
+/**
+ * 036 — El cerebro falso. Nace APAGADO: la guía de inicio primero comprueba
+ * la instancia sin cerebro (bandeja manual) y lo enciende ella misma. Desde
+ * ahí escucha hasta el final, contestando a todo lo que se le despache, pero
+ * el interruptor del Agente solo se enciende en las secciones que lo piden.
+ */
+let cerebro = null;
+
+/** El interruptor apagado y el cerebro cerrado, pase lo que pase. */
+async function limpiar() {
+  if (cookie) await apagarAgente(api).catch(() => {});
+  await cerebro?.esperar().catch(() => {});
+  await cerebro?.apagar().catch(() => {});
+}
 
 async function main() {
   if (!BOT_KEY || BOT_KEY.length < 16) {
@@ -88,6 +119,12 @@ async function main() {
     );
     process.exit(1);
   }
+  cerebro = await levantarCerebroFalso({
+    base: BASE,
+    botKey: BOT_KEY,
+    url: urlDelDespacho(),
+    escuchar: false,
+  });
 
   console.log("== Setup: registro/login + conexión WhatsApp ==");
   const email = "e2e@vocero.test";
@@ -104,6 +141,8 @@ async function main() {
     });
   }
   ok("registro o login del operador", su.res.ok, JSON.stringify(su.json));
+
+  await guiaChecks();
 
   const conn = await api("/api/settings/whatsapp", {
     method: "PUT",
@@ -130,11 +169,7 @@ async function main() {
       fromUserId: "bsu_e2e_1",
       name: "Dueña Dental",
       text: "hola, vi su anuncio",
-      // El MISMO id en las dos entregas (es la prueba de idempotencia), pero
-      // distinto en cada corrida: con uno fijo, una BD de más de 24 h dedupe
-      // el inbound, `last_inbound_at` no se refresca y el envío posterior
-      // muere con `window_closed`.
-      waMessageId: `wamid.e2e.bsuid.1.${RUN}`,
+      waMessageId: "wamid.e2e.bsuid.1",
     }),
   });
   ok("inbound BSUID entregado", inb1.res.ok, JSON.stringify(inb1.json));
@@ -164,17 +199,7 @@ async function main() {
     JSON.stringify(outbox.map((o) => ({ to: o.to, recipient: o.recipient })))
   );
 
-  // Idempotencia: re-entrega del MISMO wa_message_id.
-  //
-  // Se compara el conteo ANTES/DESPUÉS en vez de exigir `in === 1`: la
-  // conversación del BSUID sobrevive entre corridas y acumula un entrante por
-  // cada una, así que el total absoluto solo daría 1 contra una BD virgen. Lo
-  // que la prueba afirma —re-entregar un wamid ya visto no crea un mensaje
-  // nuevo— es exactamente la diferencia entre los dos conteos.
-  const inAntes = (
-    (await api(`/api/conversations/${bsuidConv?.id}/messages`)).json?.messages ?? []
-  ).filter((m) => m.direction === "in").length;
-
+  // Idempotencia: re-entrega del mismo wa_message_id
   await api("/api/dev/wa-mock/inbound", {
     method: "POST",
     body: JSON.stringify({
@@ -182,18 +207,15 @@ async function main() {
       fromUserId: "bsu_e2e_1",
       name: "Dueña Dental",
       text: "hola, vi su anuncio",
-      waMessageId: `wamid.e2e.bsuid.1.${RUN}`,
+      waMessageId: "wamid.e2e.bsuid.1",
     }),
   });
   await sleep(800);
-  const inDespues = (
-    (await api(`/api/conversations/${bsuidConv?.id}/messages`)).json?.messages ?? []
-  ).filter((m) => m.direction === "in").length;
-  ok(
-    "webhook duplicado no duplica mensajes",
-    inDespues === inAntes,
-    `antes=${inAntes} después=${inDespues}`
-  );
+  const msgs =
+    (await api(`/api/conversations/${bsuidConv?.id}/messages`)).json?.messages ??
+    [];
+  const inCount = msgs.filter((m) => m.direction === "in").length;
+  ok("webhook duplicado no duplica mensajes", inCount === 1, `in=${inCount}`);
 
   console.log("\n== us-bsuid: a un contacto sin teléfono se le puede responder ==");
   {
@@ -231,7 +253,7 @@ async function main() {
     method: "POST",
     body: JSON.stringify({
       phoneNumberId: PN,
-      from: "5214621349768",
+      from: "5215550001234",
       name: "Kevin MX",
       text: "uno",
     }),
@@ -239,7 +261,7 @@ async function main() {
   await sleep(800);
   await api("/api/dev/wa-mock/inbound", {
     method: "POST",
-    body: JSON.stringify({ phoneNumberId: PN, from: "524621349768", text: "dos" }),
+    body: JSON.stringify({ phoneNumberId: PN, from: "525550001234", text: "dos" }),
   });
   await sleep(800);
   const contacts =
@@ -268,7 +290,7 @@ async function main() {
       from: AR_REPORTADO,
       name: "Lead AR",
       text: "hola desde Argentina",
-      waMessageId: `wamid.e2e.ar.1.${RUN}`,
+      waMessageId: "wamid.e2e.ar.1",
     }),
   });
   await sleep(1200);
@@ -283,8 +305,10 @@ async function main() {
   );
 
   if (convAr) {
-    // Se cuenta lo que ya había en vez de vaciar el outbox: vaciarlo a media
-    // corrida tira estado que otras secciones comparten.
+    // Se cuenta lo que ya había en vez de vaciar el outbox: el DELETE del
+    // wa-mock reinicia su contador de wa_message_id, y en una RE-CORRIDA eso
+    // choca con los mensajes que ya están en la base (unique) y tumba el envío
+    // con un 500 que no tiene nada que ver con lo que se está probando.
     const outboxAntes =
       ((await api("/api/dev/wa-mock/outbox")).json?.outbox ?? []).length;
     const envioAr = await api(`/api/conversations/${convAr.id}/messages`, {
@@ -449,8 +473,15 @@ async function main() {
     JSON.stringify(prof.json?.kb)
   );
   ok(
-    "`enabled` NO viaja: gobierna la IA in-process, no al bot externo",
+    // 036: `enabled` es el interruptor del despacho: lo decide el CRM, no el cerebro.
+    "`enabled` NO viaja: decide si el CRM despacha, no es algo del cerebro",
     prof.json?.profile && !("enabled" in prof.json.profile)
+  );
+  ok(
+    "036: el perfil trae `llm` (por dónde y con qué modelo pensar)",
+    Boolean(prof.json) && "llm" in prof.json &&
+      (prof.json.llm === null || prof.json.llm.path === "/api/bot/llm"),
+    JSON.stringify(prof.json?.llm)
   );
   ok("`resources` presente y vacío", Array.isArray(prof.json?.resources));
 
@@ -860,25 +891,21 @@ async function main() {
   console.log("\n== FR-022: pedir un humano no deja al cliente en silencio ==");
   {
     /**
-     * El patrón de respaldo (antes del modelo) traspasaba SIN mandar nada: el
-     * cliente que escribía «quiero hablar con un humano» no recibía respuesta,
-     * aunque por dentro el traspaso sí ocurría. Lo encontró @fondeur27-09-73
-     * (#62).
+     * El caso de #62: quien escribía «quiero hablar con un humano» se quedaba
+     * sin respuesta aunque por dentro el traspaso ocurría.
      *
-     * El ai-mock, si le llegara esta frase, traspasaría SIN `farewell` y con
-     * motivo `modelo`. Así que el motivo `cliente` prueba que decidió el
-     * patrón, y el saliente prueba el arreglo: con el bug hay cero mensajes.
-     *
-     * Hay que ENCENDER el agente in-process a propósito, y apagarlo al final
-     * para no alterar lo que sigue.
+     * 036 — El patrón de respaldo que lo decidía dentro del CRM se fue con el
+     * agente incluido: ahora lo decide el cerebro (Nea avisa y traspasa). Lo
+     * que el CRM sigue debiendo, y esto protege, es entregar el acuse que el
+     * cerebro manda, registrar el traspaso con el motivo `cliente` y NO volver
+     * a despacharle una conversación ya traspasada. Con el interruptor
+     * encendido a propósito, y apagado al final.
      */
-    await api("/api/agent/profile", {
-      method: "PUT",
-      body: JSON.stringify({ enabled: true }),
-    });
+    const on = await encenderAgente(api);
+    ok("interruptor del Agente encendido con el cerebro sano", on.res.ok, `${on.res.status} ${JSON.stringify(on.json)}`);
 
     // Contacto nuevo por corrida: con uno fijo, la segunda ejecución lo
-    // encontraría ya traspasado y el agente no llegaría a correr.
+    // encontraría ya traspasado y no se despacharía nada.
     const CORRIDA = Date.now().toString().slice(-6);
     const TEL = `5214628${CORRIDA}`;
     const CANONICO = `524628${CORRIDA}`;
@@ -907,21 +934,22 @@ async function main() {
       );
 
     await decir("quiero hablar con un humano", 1);
-    // Lo que se espera es el TRASPASO; cuánto tarde el debounce no es asunto
-    // del check.
-    await hasta(async () => Boolean((await convDe())?.handoffAt));
+    // Lo que se espera es el TRASPASO; cuánto tarde la ventana de agrupado no
+    // es asunto del check.
+    await hasta(async () => Boolean((await convDe())?.handoffAt), 25000);
     const conv = await convDe();
     ok(
-      "decide el patrón de respaldo, antes del modelo (motivo `cliente`)",
-      Boolean(conv?.handoffAt) && conv?.handoffReason === "cliente",
+      "el cerebro traspasa con el motivo `cliente`",
+      Boolean(conv?.handoffAt) && conv?.handoffReason === "cliente" && conv?.aiEnabled === false,
       JSON.stringify({ handoffAt: conv?.handoffAt, reason: conv?.handoffReason })
     );
 
     if (conv) {
+      await hasta(async () => (await salientesDe(conv.id)).length > 0, 5000);
       const salientes = await salientesDe(conv.id);
       ok(
-        "el cliente recibe un acuse antes del traspaso (antes: cero mensajes)",
-        salientes.length === 1 && /persona del equipo/.test(salientes[0]?.text ?? ""),
+        "el cliente recibe el acuse antes del traspaso (no silencio)",
+        salientes.length === 1 && salientes[0]?.text === ACUSE_TRASPASO,
         `salientes=${salientes.length} ${JSON.stringify(salientes.map((m) => m.text))}`
       );
       ok(
@@ -936,23 +964,24 @@ async function main() {
         `envíos=${cable.length}`
       );
 
-      // Un turno nuevo sobre la conversación YA traspasada: su último
-      // entrante vuelve a ser la frase del patrón, así que si el silencio del
-      // traspaso no mandara, el acuse saldría otra vez.
+      // Un turno nuevo sobre la conversación YA traspasada: si el CRM se la
+      // despachara, el cerebro volvería a avisar y el acuse saldría otra vez.
       await decir("sigo esperando, quiero hablar con un humano", 2);
       const coalesce = Number(process.env.AGENT_COALESCE_MS ?? 6000);
       await sleep(coalesce + 2500);
       ok(
-        "tras el traspaso la IA calla: el acuse NO se repite",
+        "tras el traspaso no se despacha: el cerebro recibió un solo turno",
+        cerebro.de(conv.id).length === 1,
+        `turnos=${cerebro.de(conv.id).length}`
+      );
+      ok(
+        "y el acuse NO se repite",
         (await salientesDe(conv.id)).length === 1 && (await alCliente()).length === 1,
         `salientes=${(await salientesDe(conv.id)).length} envíos=${(await alCliente()).length}`
       );
     }
 
-    await api("/api/agent/profile", {
-      method: "PUT",
-      body: JSON.stringify({ enabled: false }),
-    });
+    await apagarAgente(api);
   }
 
   console.log("\n== 008: paridad inbox — echoes de coexistence (US1) ==");
@@ -966,7 +995,7 @@ async function main() {
       from: LEAD,
       name: "Lead 008",
       text: "hola, quiero informes",
-      waMessageId: `wamid.e2e.008.in.1.${RUN}`,
+      waMessageId: "wamid.e2e.008.in.1",
     }),
   });
   await sleep(1200);
@@ -979,30 +1008,37 @@ async function main() {
   const inboundAtBefore = conv008?.lastInboundAt;
 
   // Echo: el dueño contesta A MANO desde la app del teléfono.
-  // El texto también lleva el RUN: más abajo se cuenta por texto exacto y los
-  // mensajes de corridas anteriores persisten en la misma conversación.
-  const manualText = `te contesto yo, dame un minuto (${RUN})`;
   const echo1 = await api("/api/dev/wa-mock/echo", {
     method: "POST",
     body: JSON.stringify({
       phoneNumberId: PN,
       to: LEAD,
-      text: manualText,
-      waMessageId: `wamid.e2e.008.echo.1.${RUN}`,
+      text: "te contesto yo, dame un minuto",
+      waMessageId: "wamid.e2e.008.echo.1",
     }),
   });
   ok("echo entregado al webhook", echo1.res.ok, JSON.stringify(echo1.json));
   await sleep(900);
 
   const msgs1 = (await api(`/api/conversations/${conv008.id}/messages`)).json?.messages ?? [];
-  const manual1 = msgs1.find((m) => m.text === manualText);
+  const manual1 = msgs1.find((m) => m.text === "te contesto yo, dame un minuto");
   ok(
     "el mensaje manual aparece como saliente origin=manual",
     manual1?.direction === "out" && manual1?.origin === "manual" && manual1?.status === "sent",
     JSON.stringify(manual1)
   );
 
-  conv008 = await findConv008();
+  // Se espera la pausa, no un tiempo fijo: el eco guarda el mensaje y DESPUÉS
+  // pausa la IA. Leer la conversación entre un paso y otro —pasa con el
+  // servidor recién arrancado— daba la IA encendida sin que nada fallara.
+  await hasta(
+    async () => {
+      conv008 = await findConv008();
+      return conv008?.handoffReason === "manual_reply";
+    },
+    5000,
+    150
+  );
   ok(
     "la IA quedó pausada con handoff manual_reply",
     conv008?.aiEnabled === false && conv008?.handoffReason === "manual_reply",
@@ -1020,15 +1056,15 @@ async function main() {
     body: JSON.stringify({
       phoneNumberId: PN,
       to: LEAD,
-      text: manualText,
-      waMessageId: `wamid.e2e.008.echo.1.${RUN}`,
+      text: "te contesto yo, dame un minuto",
+      waMessageId: "wamid.e2e.008.echo.1",
     }),
   });
   await sleep(700);
   const msgs2 = (await api(`/api/conversations/${conv008.id}/messages`)).json?.messages ?? [];
   ok(
     "echo duplicado (mismo wamid) no duplica el mensaje",
-    msgs2.filter((m) => m.text === manualText).length === 1
+    msgs2.filter((m) => m.text === "te contesto yo, dame un minuto").length === 1
   );
 
   // Variante defensiva: echoes bajo la clave `messages`.
@@ -1038,7 +1074,7 @@ async function main() {
       phoneNumberId: PN,
       to: LEAD,
       text: "segundo mensaje manual",
-      waMessageId: `wamid.e2e.008.echo.2.${RUN}`,
+      waMessageId: "wamid.e2e.008.echo.2",
       useMessagesKey: true,
     }),
   });
@@ -1056,7 +1092,7 @@ async function main() {
       phoneNumberId: PN,
       to: "5214627008002",
       text: "hola, te escribo del anuncio",
-      waMessageId: `wamid.e2e.008.echo.3.${RUN}`,
+      waMessageId: "wamid.e2e.008.echo.3",
     }),
   });
   await sleep(700);
@@ -1094,11 +1130,7 @@ async function main() {
   ok("imagen con caption enviada (201)", upRes.status === 201, JSON.stringify(upJson));
 
   const msgs4 = (await api(`/api/conversations/${conv008.id}/messages`)).json?.messages ?? [];
-  // `findLast` y no `find`: esta conversación sobrevive entre corridas y
-  // acumula un mensaje con este mismo caption por cada una. `find` devolvía
-  // el MÁS VIEJO, cuyo binario puede haberse escrito bajo otro MEDIA_DIR —
-  // 410 al servirlo, sin que nada del producto esté roto.
-  const sentImg = msgs4.findLast((m) => m.media?.caption === "mira nuestro local");
+  const sentImg = msgs4.find((m) => m.media?.caption === "mira nuestro local");
   ok(
     "el saliente con imagen trae asset disponible y origin=operator",
     sentImg?.type === "image" &&
@@ -1166,16 +1198,12 @@ async function main() {
       type: "image",
       mediaId: "media-e2e-img-1",
       caption: "foto de mi negocio",
-      waMessageId: `wamid.e2e.008.in.img.${RUN}`,
+      waMessageId: "wamid.e2e.008.in.img",
     }),
   });
   await sleep(1600); // ingesta + descarga in-process del binario
   const msgs6 = (await api(`/api/conversations/${conv008.id}/messages`)).json?.messages ?? [];
-  // `findLast` y no `find`: esta conversación sobrevive entre corridas y
-  // acumula un mensaje con este mismo caption por cada una. `find` devolvía
-  // el MÁS VIEJO, cuyo binario puede haberse escrito bajo otro MEDIA_DIR —
-  // 410 al servirlo, sin que nada del producto esté roto.
-  const inImg = msgs6.findLast((m) => m.media?.caption === "foto de mi negocio");
+  const inImg = msgs6.find((m) => m.media?.caption === "foto de mi negocio");
   ok(
     "imagen entrante queda disponible tras la descarga in-process",
     inImg?.direction === "in" &&
@@ -1196,7 +1224,7 @@ async function main() {
       from: LEAD,
       type: "location",
       location: { latitude: 20.5, longitude: -100.8, name: "Mi taller" },
-      waMessageId: `wamid.e2e.008.in.loc.${RUN}`,
+      waMessageId: "wamid.e2e.008.in.loc",
     }),
   });
   await sleep(900);
@@ -1217,7 +1245,7 @@ async function main() {
       from: LEAD,
       type: "image",
       mediaId: "broken-no-url",
-      waMessageId: `wamid.e2e.008.in.broken.${RUN}`,
+      waMessageId: "wamid.e2e.008.in.broken",
     }),
   });
   await sleep(1600);
@@ -1244,7 +1272,7 @@ async function main() {
       type: "image",
       mediaId: "media-e2e-echo-img",
       caption: "así quedaría tu logo",
-      waMessageId: `wamid.e2e.008.echo.img.${RUN}`,
+      waMessageId: "wamid.e2e.008.echo.img",
     }),
   });
   await sleep(1600);
@@ -1256,169 +1284,195 @@ async function main() {
     JSON.stringify(echoImg?.media)
   );
 
+  await respuestasDeBotonChecks();
   await agendaChecks();
-  await pulirBorradorChecks(conv008.id);
   await atribucionChecks();
-  await cabecerasChecks();
   await anuncioDeOrigenChecks();
   await r11BotChecks();
 
+  await limpiar();
   console.log(`\n===== ${checks - failures}/${checks} checks OK, ${failures} fallos =====`);
   process.exit(failures > 0 ? 1 : 0);
 }
 
 /* ============================================================
- * Pulir borrador del operador (tests/e2e/us-pulir-borrador.md)
- *
- * Lo que importa no es que redacte bonito —eso lo decide el modelo— sino que
- * NO invente y que jamás envíe. Un pulido que agrega un precio o que se cuela
- * como mensaje al cliente es un fallo de producto, no de estilo.
- * ============================================================ */
+ * #78 — Respuestas de botón. Cuando el cliente toca un botón de respuesta
+ * rápida de una plantilla, Meta manda `type: "button"`; cuando toca un botón
+ * o una fila de lista de un mensaje interactivo, `type: "interactive"`. La
+ * ingesta los descartaba: ni bandeja, ni ventana de 24 h, ni agente. Ahora
+ * entran como texto con el rótulo del botón, igual que si lo hubiera
+ * tecleado. Los payloads del mock tienen la forma documentada por Meta.
+ * ========================================================================== */
+async function respuestasDeBotonChecks() {
+  console.log("\n== #78: una respuesta de botón entra como texto del cliente ==");
+  // Contacto nuevo por corrida: la sección cuenta entrantes y espera la
+  // respuesta del agente a ESTE botón, no a los de una corrida anterior.
+  const CORRIDA = Date.now().toString().slice(-6);
+  const LEAD_B = `5215550${CORRIDA}`;
+  const TEL_B = `525550${CORRIDA}`;
 
-async function pulirBorradorChecks(conversationId) {
-  console.log("\n== pulir el borrador del operador ==");
+  // 036: contesta el cerebro falso, con el interruptor encendido.
+  const on = await encenderAgente(api);
+  ok("interruptor del Agente encendido (cerebro sano)", on.res.ok, `${on.res.status} ${JSON.stringify(on.json)}`);
 
-  const borrador = "oye si tenemos stock, te lo mando el jueve";
-  const antes = (await api(`/api/conversations/${conversationId}/messages`)).json
-    ?.messages?.length;
+  const entrante = (extra, n) =>
+    api("/api/dev/wa-mock/inbound", {
+      method: "POST",
+      body: JSON.stringify({
+        phoneNumberId: PN,
+        from: LEAD_B,
+        name: "Lead botones",
+        waMessageId: `wamid.e2e.78.${CORRIDA}.${n}`,
+        ...extra,
+      }),
+    });
+  const conversacion = async () =>
+    ((await api("/api/conversations")).json?.conversations ?? []).find(
+      (c) => c.contact.phone === TEL_B
+    ) ?? null;
+  const mensajesDe = async (convId) =>
+    (await api(`/api/conversations/${convId}/messages`)).json?.messages ?? [];
+  const entrantes = async (convId) =>
+    (await mensajesDe(convId)).filter((m) => m.direction === "in");
 
-  const { res, json } = await api("/api/inbox/compose-assist", {
-    method: "POST",
-    body: JSON.stringify({ draft: borrador }),
-  });
-
-  ok("pulir: responde 200 con texto", res.status === 200 && !!json?.text,
-    `${res.status} ${JSON.stringify(json)}`);
-
-  const pulido = json?.text ?? "";
-  ok("pulir: devuelve algo distinto del borrador", pulido !== borrador, pulido);
-
-  // La garantía dura: no inventa datos. El borrador no menciona precio ni
-  // moneda, así que el pulido tampoco puede.
-  ok(
-    "pulir: NO inventa precios ni cifras que no estaban",
-    !/\$|\bpesos\b|\d+\s*(mxn|usd)/i.test(pulido),
-    pulido
+  // 1) Botón de respuesta rápida de una plantilla.
+  const envio = await entrante(
+    { type: "button", button: { text: "Sí, me interesa", payload: "SI_INTERESA" } },
+    1
   );
-  ok(
-    "pulir: conserva el contenido del borrador (stock y jueves)",
-    /stock/i.test(pulido) && /jueve/i.test(pulido),
-    pulido
-  );
-
-  // La otra garantía dura: es una PROPUESTA. Nada se envió.
-  const despues = (await api(`/api/conversations/${conversationId}/messages`)).json
-    ?.messages?.length;
-  ok(
-    "pulir: no envía nada — el hilo no crece",
-    antes === despues,
-    `antes=${antes} despues=${despues}`
-  );
-
-  // Contrato de entrada: un borrador vacío se rechaza antes de gastar una
-  // llamada al proveedor.
-  const vacio = await api("/api/inbox/compose-assist", {
-    method: "POST",
-    body: JSON.stringify({ draft: "   " }),
+  ok("el webhook acepta un `type: \"button\"`", envio.res.ok, JSON.stringify(envio.json));
+  let conv = null;
+  await hasta(async () => {
+    conv = await conversacion();
+    return !!conv;
   });
-  ok("pulir: borrador vacío → 422", vacio.res.status === 422, `${vacio.res.status}`);
+  ok("el botón de plantilla crea la conversación en la bandeja", !!conv);
+  if (conv) {
+    const boton = (await entrantes(conv.id)).find((m) => m.text === "Sí, me interesa");
+    ok(
+      "y queda como texto con el rótulo del botón (type=text, no button)",
+      boton?.type === "text",
+      JSON.stringify((await mensajesDe(conv.id)).map((m) => [m.direction, m.type, m.text]))
+    );
+    // La conversación se releyó: la de arriba se tomó en cuanto apareció, y la
+    // ingesta la crea ANTES de guardar el mensaje y anotarle la hora. Leída en
+    // ese hueco, la ventana salía cerrada sin que el producto fallara.
+    conv = (await conversacion()) ?? conv;
+    ok(
+      "abre la ventana de 24 h",
+      conv.windowOpen === true && !!conv.lastInboundAt,
+      JSON.stringify({ windowOpen: conv.windowOpen, lastInboundAt: conv.lastInboundAt })
+    );
+    const contesto = await hasta(
+      async () =>
+        (await mensajesDe(conv.id)).some(
+          (m) =>
+            m.direction === "out" &&
+            m.aiGenerated === true &&
+            (m.text ?? "").includes("Sí, me interesa")
+        ),
+      20000
+    );
+    ok(
+      "y le llega al cerebro como cualquier texto (contestó pensando por /api/bot/llm)",
+      contesto,
+      JSON.stringify((await mensajesDe(conv.id)).map((m) => [m.direction, m.text]))
+    );
+    const despacho = cerebro.de(conv.id)[0]?.evento?.messages?.[0];
+    ok(
+      "el despacho trae el rótulo del botón como texto",
+      despacho?.type === "text" && despacho?.text === "Sí, me interesa",
+      JSON.stringify(despacho)
+    );
 
-  // Y sin sesión no se toca: es una superficie autenticada como cualquier otra.
-  const sinSesion = await fetch(`${BASE}/api/inbox/compose-assist`, {
-    method: "POST",
-    headers: { "content-type": "application/json", origin: BASE },
-    body: JSON.stringify({ draft: borrador }),
-  });
-  ok("pulir: sin sesión → 401", sinSesion.status === 401, `${sinSesion.status}`);
+    // 2) Botón de un mensaje interactivo.
+    await entrante(
+      {
+        type: "interactive",
+        interactive: {
+          type: "button_reply",
+          button_reply: { id: "cancel-button", title: "Cancelar" },
+        },
+      },
+      2
+    );
+    const hayCancelar = await hasta(async () =>
+      (await entrantes(conv.id)).some((m) => m.type === "text" && m.text === "Cancelar")
+    );
+    ok("un button_reply interactivo entra como texto con su título", hayCancelar);
+
+    // 3) Fila de una lista.
+    await entrante(
+      {
+        type: "interactive",
+        interactive: {
+          type: "list_reply",
+          list_reply: {
+            id: "priority_express",
+            title: "Envío exprés",
+            description: "Llega mañana",
+          },
+        },
+      },
+      3
+    );
+    const hayLista = await hasta(async () =>
+      (await entrantes(conv.id)).some((m) => m.type === "text" && m.text === "Envío exprés")
+    );
+    ok("un list_reply entra como texto con el título de la fila (no la descripción)", hayLista);
+
+    // Camino infeliz: respuesta sin rótulo ni id → se descarta con aviso y
+    // el webhook sigue vivo; el hilo no gana un mensaje vacío.
+    const roto = await entrante(
+      { type: "interactive", interactive: { type: "button_reply", button_reply: {} } },
+      4
+    );
+    ok("una respuesta de botón sin rótulo no tumba el webhook", roto.res.ok);
+    await sleep(800);
+    const n = (await entrantes(conv.id)).length;
+    ok("y no deja un mensaje vacío en el hilo", n === 3, `entrantes=${n}`);
+  }
+
+  await apagarAgente(api);
 }
 
 /* ============================================================
  * «Quién responde a tus clientes» (tests/e2e/us-bot-api.md, pasos 40-44)
  *
- * El agente incluido y un cerebro externo (Nea) no se ven entre sí: con los
- * dos activos, el cliente recibe dos respuestas. La tarjeta del Agente lo
- * dice con dos señales: la última llamada autenticada a /api/bot/* (en
- * memoria) y el /health de Nea si hay BRAIN_HEALTH_URL. Aquí se levanta una
- * Nea FALSA en el puerto de esa URL (tiene que ser local) — la app ya corre
- * con ella en su .env — y se la pone sana y después colgada.
+ * 036 — Ya no hay agente incluido: la tarjeta dice si hay un cerebro
+ * conectado, si el interruptor deja que el CRM le despache, y qué contesta su
+ * `/health`. Se pregunta al `/health` del mismo origen del despacho (o a
+ * `BRAIN_HEALTH_URL`), que aquí sirve el cerebro falso: se le pone sano y
+ * después colgado. Se fue el aviso `doble_respuesta` (ya no hay dos que
+ * contesten desde el CRM); entra `apagado`. El paso de credenciales en
+ * `BRAIN_HEALTH_URL` (Authorization: Basic) lo cubre la unitaria
+ * `brain-status.test.ts`: la configuración estándar no trae esa variable.
  * ============================================================ */
-
-/** Una Nea de mentira: responde su /health como la Nea de verdad. */
-async function levantarNeaFalsa(url) {
-  const { createServer } = await import("node:http");
-  const estado = { modo: "sana", pedidos: 0, ultimaAuth: null, ultimaRuta: null };
-  const server = createServer((req, res) => {
-    if ((req.url ?? "").split("?")[0] !== url.pathname) {
-      res.writeHead(404);
-      return res.end();
-    }
-    estado.pedidos++;
-    estado.ultimaAuth = req.headers.authorization ?? null;
-    estado.ultimaRuta = req.url;
-    if (estado.modo === "colgada") return; // nunca contesta
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(
-      JSON.stringify({
-        status: "ok",
-        db: "ok",
-        version: "1.0.0",
-        commit: "abc1234",
-        commitVerified: true,
-        mode: "estándar",
-        relay: { pendientes: 0, masViejoSegundos: null, ultimoErrorEn: null },
-      })
-    );
-  });
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(Number(url.port || 80), url.hostname.replace(/^\[|\]$/g, ""), resolve);
-  });
-  return {
-    estado,
-    cerrar: () =>
-      new Promise((resolve) => {
-        server.closeAllConnections();
-        server.close(() => resolve());
-      }),
-  };
-}
 
 async function quienRespondeChecks(convId) {
   console.log("\n== quién responde: la tarjeta del Agente ==");
   const estado = async () => (await api("/api/agent/brain-status")).json;
-
-  const raw = process.env.BRAIN_HEALTH_URL;
-  const url = raw ? new URL(raw) : null;
-  const local = url && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
-  if (url && !local) {
-    console.log(`  SKIP /health: BRAIN_HEALTH_URL apunta a ${url.host}, no a esta máquina`);
-  }
-  // Antes de la primera consulta: así la caché de 15 s no guarda un «no está
-  // en línea» de antes de que la Nea falsa existiera.
-  const nea = local ? await levantarNeaFalsa(url) : null;
-  const perfil = (await api("/api/agent/profile")).json;
-  const enabledOriginal = perfil?.profile?.enabled === true;
   try {
-    await quienResponde(convId, estado, url, nea);
+    await quienResponde(convId, estado);
   } finally {
-    await nea?.cerrar();
-    await api("/api/agent/profile", {
-      method: "PUT",
-      body: JSON.stringify({ enabled: enabledOriginal }),
-    });
+    cerebro.estado.salud = "ok";
+    await apagarAgente(api);
   }
 }
 
-async function quienResponde(convId, estado, url, nea) {
+async function quienResponde(convId, estado) {
   const anon = await fetch(`${BASE}/api/agent/brain-status`);
   ok("brain-status sin sesión → 401", anon.status === 401);
 
   const antes = await estado();
   ok(
-    "brain-status con sesión → las dos filas y el aviso",
-    typeof antes?.embedded?.answering === "boolean" &&
+    "brain-status con sesión → interruptor, IA, cerebro, despacho y aviso (sin `embedded`)",
+    typeof antes?.enabled === "boolean" &&
+      typeof antes?.aiConfigured === "boolean" &&
       typeof antes?.external?.active === "boolean" &&
-      "warning" in (antes ?? {}),
+      antes?.dispatch?.active === true &&
+      "warning" in (antes ?? {}) &&
+      !("embedded" in (antes ?? {})),
     JSON.stringify(antes)
   );
   ok("la llave del cerebro externo cuenta como configurada", antes?.external?.keyConfigured === true);
@@ -1444,78 +1498,58 @@ async function quienResponde(convId, estado, url, nea) {
   );
   ok("…y el cerebro externo cuenta como activo", despues?.external?.active === true);
 
-  if (!url) {
-    ok("sin BRAIN_HEALTH_URL no se le pregunta a nadie (health: null)", despues?.external?.health === null);
-    console.log(
-      "  (para probar el /health: BRAIN_HEALTH_URL=http://127.0.0.1:<puerto>/health en .env y reinicia la app)"
-    );
-  }
-
-  if (nea) {
-    // Una corrida anterior pudo dejar en caché a su Nea colgada (15 s).
+  if (process.env.BRAIN_HEALTH_URL) {
+    console.log("  SKIP /health del cerebro falso: BRAIN_HEALTH_URL apunta a otro lado");
+  } else {
+    const despacho = new URL(process.env.BRAIN_DISPATCH_URL);
+    // Una consulta anterior pudo dejar en caché un /health caído (15 s).
     let h = null;
     const enLinea = await hasta(async () => {
       h = (await estado())?.external?.health ?? null;
       return h?.reachable === true;
     }, 25_000, 1000);
-    ok("con la Nea falsa sana: en línea", enLinea, JSON.stringify(h));
+    ok("con el cerebro falso sano: en línea", enLinea, JSON.stringify(h));
     ok(
       "…con versión, modo y cola del relevo",
-      h?.version === "1.0.0" && h?.mode === "estándar" && h?.relay?.pendientes === 0,
+      h?.version === "2.0.0-e2e" && h?.mode === "estándar" && h?.relay?.pendientes === 0,
       JSON.stringify(h)
     );
-    ok("…y solo el host de la URL", h?.host === url.host, h?.host);
+    ok("…y solo el host del despacho", h?.host === despacho.host, h?.host);
     const dump = JSON.stringify(await estado());
-    const secretos = [url.username, url.password, url.search.slice(1)].filter(Boolean);
     ok(
-      "credenciales y query de BRAIN_HEALTH_URL no salen en la respuesta",
-      secretos.every((s) => !dump.includes(decodeURIComponent(s))),
-      `revisados ${secretos.length}`
+      "ni la ruta del despacho ni la llave salen en la respuesta",
+      !dump.includes(despacho.pathname) && !dump.includes(BOT_KEY)
     );
-    if (url.username || url.password) {
-      ok(
-        "…pero sí viajan a Nea (Authorization: Basic)",
-        nea.estado.ultimaAuth ===
-          `Basic ${Buffer.from(`${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`).toString("base64")}`
-      );
-    }
-    const pedidosAntes = nea.estado.pedidos;
+    const pedidosAntes = cerebro.estado.saludPedidos;
     await Promise.all([estado(), estado(), estado()]);
     ok(
-      "tres consultas seguidas no martillan a Nea (caché)",
-      nea.estado.pedidos === pedidosAntes,
-      `${pedidosAntes} → ${nea.estado.pedidos}`
+      "tres consultas seguidas no martillan al cerebro (caché)",
+      cerebro.estado.saludPedidos === pedidosAntes,
+      `${pedidosAntes} → ${cerebro.estado.saludPedidos}`
     );
   }
 
-  // Los dos contestando: el aviso rojo.
-  const on = await api("/api/agent/profile", {
-    method: "PUT",
-    body: JSON.stringify({ enabled: true }),
-  });
-  ok("agente incluido encendido desde la pantalla", on.res.ok);
-  const doble = await estado();
+  // 036 — Los avisos: `apagado` con cerebro e interruptor apagado; ninguno
+  // con los dos. (`doble_respuesta` ya no existe.)
+  await apagarAgente(api);
+  const apagado = await estado();
   ok(
-    "con token de IA + agente encendido + cerebro externo activo → doble_respuesta",
-    doble?.embedded?.configured === true &&
-      doble?.embedded?.answering === true &&
-      doble?.warning === "doble_respuesta",
-    JSON.stringify({ embedded: doble?.embedded, warning: doble?.warning })
+    "cerebro conectado + interruptor apagado → aviso «apagado»",
+    apagado?.enabled === false && apagado?.warning === "apagado",
+    JSON.stringify({ enabled: apagado?.enabled, warning: apagado?.warning })
   );
-  await api("/api/agent/profile", {
-    method: "PUT",
-    body: JSON.stringify({ enabled: false }),
-  });
-  const solo = await estado();
+  const on = await encenderAgente(api);
+  ok("encender el agente desde la pantalla (cerebro sano)", on.res.ok, `${on.res.status} ${JSON.stringify(on.json)}`);
+  const encendido = await estado();
   ok(
-    "apagar el agente incluido quita el aviso (contesta solo el externo)",
-    solo?.embedded?.answering === false && solo?.warning === null,
-    JSON.stringify({ embedded: solo?.embedded, warning: solo?.warning })
+    "cerebro conectado + interruptor encendido → sin aviso",
+    encendido?.enabled === true && encendido?.warning === null,
+    JSON.stringify({ enabled: encendido?.enabled, warning: encendido?.warning })
   );
 
-  if (nea) {
-    // Nea colgada: la tarjeta se entera sin quedarse esperando.
-    nea.estado.modo = "colgada";
+  if (!process.env.BRAIN_HEALTH_URL) {
+    // Cerebro colgado: la tarjeta se entera sin quedarse esperando.
+    cerebro.estado.salud = "colgada";
     let h = null;
     let masLenta = 0;
     const caida = await hasta(async () => {
@@ -1525,18 +1559,18 @@ async function quienResponde(convId, estado, url, nea) {
       return h?.reachable === false;
     }, 25_000, 1000);
     ok(
-      "con Nea colgada: no está en línea, por tiempo agotado",
+      "con el cerebro colgado: no está en línea, por tiempo agotado",
       caida && h?.problem === "timeout",
       JSON.stringify(h)
     );
     ok(
-      "…y la consulta no se cuelga con ella (≤ 4 s)",
+      "…y la consulta no se cuelga con él (≤ 4 s)",
       masLenta <= 4000,
       `${masLenta} ms`
     );
     const sigue = await estado();
     ok(
-      "…la llamada reciente la sigue contando como activa",
+      "…la llamada reciente lo sigue contando como activo",
       sigue?.external?.active === true,
       JSON.stringify(sigue?.external)
     );
@@ -1544,18 +1578,344 @@ async function quienResponde(convId, estado, url, nea) {
 }
 
 /* ============================================================
- * us5 — Guardar la conexión respeta el override de un cerebro externo
- * (tests/e2e/us5-connect.md, paso 7)
+ * Guía de inicio — la primera pantalla (tests/e2e/us-guia-de-inicio.md, #86)
  *
- * En Meta, `POST {WABA}/subscribed_apps` SIN cuerpo es la forma documentada
- * de BORRAR el override de callback de la WABA, y el CRM lo mandaba en cada
- * "Guardar": un cerebro externo (Nea) que recibe los webhooks por ese override
- * quedaba sordo sin que nada lo avisara. El wa-mock se comporta como Meta, así
- * que si el CRM vuelve a re-suscribir a ciegas, esto se pone rojo.
+ * Lo que se protege: que la raíz mande a la guía mientras falte un paso, que
+ * cada paso se marque solo cuando la pieza de verdad funciona (la misma
+ * fuente que usa el resto de la app), y que «Encender» saque la guía del
+ * camino. Corre justo después del login, antes de que el resto del guion
+ * conecte nada: así se ve la instancia como la ve quien acaba de instalar. En
+ * una RE-CORRIDA la base ya trae de todo, así que primero se vuelve al punto
+ * de partida (sin llave, sin número, agente sin instrucciones y apagado) y al
+ * final se deja como estaba para lo que sigue.
+ *
+ * 036 — Entra el paso OPCIONAL «Conecta tu agente» (listo con el despacho
+ * configurado y el `/health` del cerebro contestando). Sin cerebro, Vocero es
+ * una bandeja manual: con los demás pasos listos la guía está completa y la
+ * raíz NO atrapa a nadie en /onboarding; encender da 409 `sin_cerebro`. Con
+ * el cerebro falso encendido, la guía vuelve a pedir encender, como antes.
+ * ============================================================ */
+
+async function guiaChecks() {
+  console.log("\n== guía de inicio: la primera pantalla ==");
+  const agenda = /^(on|1|true|si|sí|yes)$/i.test((process.env.AGENDA ?? "").trim());
+  // La app lee el mismo .env que este guion: si trae la llave, el paso 2 ya
+  // está listo «por el respaldo del entorno» y la guía lo dice así.
+  const respaldoEnv = Boolean((process.env.OPENROUTER_API_TOKEN ?? "").trim());
+
+  const estado = async () => (await api("/api/onboarding/status")).json;
+  const paso = async (key) => (await estado())?.steps?.find((s) => s.key === key);
+  /** A dónde manda la raíz con la sesión del operador. */
+  const raiz = async () => {
+    const res = await fetch(`${BASE}/`, { redirect: "manual", headers: { cookie } });
+    const loc = res.headers.get("location") ?? "";
+    return `${res.status} ${loc}`;
+  };
+  const mandaA = (destino) => (r) =>
+    /^30[0-9] /.test(r) && (r.endsWith(destino) || r.endsWith(`${destino}/`));
+  // React separa las expresiones JSX con `<!-- -->` en el HTML del servidor:
+  // «Deja listo tu CRM en <!-- -->4<!-- --> pasos». Se compara el texto.
+  const texto = (h) => h.replace(/<!--.*?-->/g, "");
+  const pantallaHtml = async () =>
+    texto(await (await fetch(`${BASE}/onboarding`, { headers: { cookie } })).text());
+
+  // --- Punto de partida reproducible ---
+  await api("/api/settings/ai", { method: "DELETE" });
+  await api("/api/settings/whatsapp", { method: "DELETE" });
+  await api("/api/agent/profile", {
+    method: "PUT",
+    body: JSON.stringify({ enabled: false, instructions: null }),
+  });
+  for (const e of (await api("/api/kb")).json?.entries ?? []) {
+    await api(`/api/kb/${e.id}`, { method: "DELETE" });
+  }
+  if (agenda) {
+    // Todos los días cerrados: el paso de agenda queda pendiente aunque una
+    // corrida anterior ya hubiera guardado horarios.
+    await api("/api/calendar/settings", {
+      method: "PUT",
+      body: JSON.stringify({ connector: "enlace-fijo", weeklyHours: {} }),
+    });
+  }
+
+  // --- Lo que ve quien acaba de instalar ---
+  const anon = await fetch(`${BASE}/api/onboarding/status`);
+  ok("estado sin sesión → 401", anon.status === 401, `status=${anon.status}`);
+
+  const inicial = await estado();
+  ok(
+    "GET /api/onboarding/status → pasos verificados + guía + agente apagado",
+    Array.isArray(inicial?.steps) && inicial?.enabled === false && inicial?.guide?.complete === false,
+    JSON.stringify(inicial)
+  );
+  ok(
+    "los pasos de la raíz: agente, IA, WhatsApp, cerebro y agenda",
+    JSON.stringify(inicial?.steps?.map((s) => s.key)) ===
+      JSON.stringify(["profile", "ai", "whatsapp", "brain", "calendar"]),
+    JSON.stringify(inicial?.steps?.map((s) => s.key))
+  );
+  const guiaKeys = inicial?.guide?.steps?.map((s) => s.key) ?? [];
+  ok(
+    agenda
+      ? "con la agenda encendida la guía tiene 5 pasos (con «Conecta tu agente»)"
+      : "sin agenda la guía tiene 4 pasos (el de agenda ni se pinta)",
+    JSON.stringify(guiaKeys) ===
+      JSON.stringify(
+        agenda ? ["agent", "ai", "whatsapp", "brain", "calendar"] : ["agent", "ai", "whatsapp", "brain"]
+      ),
+    JSON.stringify(guiaKeys)
+  );
+  const perfil0 = inicial?.steps?.find((s) => s.key === "profile");
+  ok(
+    "el agente con nombre de fábrica y sin instrucciones está pendiente y dice qué falta",
+    perfil0?.status === "pending" && /nombre/.test(perfil0?.nextAction ?? ""),
+    JSON.stringify(perfil0)
+  );
+  ok(
+    "WhatsApp sin número → pendiente",
+    inicial?.steps?.find((s) => s.key === "whatsapp")?.status === "pending"
+  );
+  const ia0 = inicial?.steps?.find((s) => s.key === "ai");
+  ok(
+    respaldoEnv
+      ? "IA: sin fila guardada cuenta el respaldo del entorno (OPENROUTER_*)"
+      : "IA: sin fila ni entorno → pendiente",
+    respaldoEnv
+      ? ia0?.status === "ready" && /entorno/.test(ia0?.nextAction ?? "")
+      : ia0?.status === "pending",
+    JSON.stringify(ia0)
+  );
+
+  // 036 — El cerebro falso aún no escucha. El CRM guarda el /health 15 s: si
+  // otro guion lo vio sano hace poco, se espera a que la caché venza.
+  let cerebro0 = null;
+  await hasta(async () => {
+    cerebro0 = await paso("brain");
+    return cerebro0?.status === "pending";
+  }, 25_000, 1000);
+  ok(
+    "paso «Conecta tu agente»: despacho configurado y cerebro sin contestar → pendiente, y dice por qué",
+    cerebro0?.status === "pending" &&
+      /no contesta|no responde/.test(`${cerebro0?.nextAction} ${cerebro0?.problem}`),
+    JSON.stringify(cerebro0)
+  );
+  const brainGuia = (await estado())?.guide?.steps?.find((s) => s.key === "brain");
+  ok(
+    "…es opcional y lleva a la receta del par (fuera de la app)",
+    brainGuia?.optional === true && /^https:\/\//.test(brainGuia?.href ?? "") && brainGuia?.done === false,
+    JSON.stringify(brainGuia)
+  );
+
+  const r0 = await raiz();
+  ok("la raíz manda a /onboarding mientras falte un paso", mandaA("/onboarding")(r0), r0);
+
+  // La pantalla se compila en su primer request en `next dev`: espera activa.
+  let html = "";
+  const pantalla = await hasta(async () => {
+    const res = await fetch(`${BASE}/onboarding`, { headers: { cookie } });
+    html = res.ok ? texto(await res.text()) : "";
+    return res.ok && html.includes("Deja listo tu CRM en");
+  }, 40_000, 1000);
+  ok("la pantalla /onboarding carga con la cabecera «Deja listo tu CRM en N pasos»", pantalla);
+  ok(
+    `…y cuenta los ${guiaKeys.length} pasos de esta instancia`,
+    html.includes(`Deja listo tu CRM en ${guiaKeys.length} pasos`)
+  );
+  ok(
+    "…con «Conecta tu agente» marcado como opcional",
+    html.includes("Conecta tu agente") && html.includes("Opcional")
+  );
+  ok(
+    "…con la tarjeta final explicando que el agente empieza apagado",
+    html.includes("Al final: encender a") && html.includes("empieza apagado")
+  );
+  ok("…y la entrada «Guía de inicio» en el menú", html.includes("Guía de inicio"));
+
+  // --- Los pasos se marcan solos ---
+  const perfilOk = await api("/api/agent/profile", {
+    method: "PUT",
+    body: JSON.stringify({ name: "Sofi", instructions: "Vendemos limpiezas dentales." }),
+  });
+  ok(
+    "paso 1: guardar nombre + instrucciones lo deja listo",
+    perfilOk.res.ok && (await paso("profile"))?.status === "ready"
+  );
+
+  const guardarIa = await api("/api/settings/ai", {
+    method: "PUT",
+    body: JSON.stringify({
+      provider: "openai_compatible",
+      baseUrl: process.env.OPENROUTER_BASE_URL ?? `${BASE}/api/dev/ai-mock`,
+      model: "mock/modelo-e2e",
+      token: "tok-ia-e2e-0001",
+    }),
+  });
+  const iaFila = await paso("ai");
+  ok(
+    "paso 2: la llave guardada en Ajustes → IA lo deja listo (la fila manda)",
+    guardarIa.res.ok && iaFila?.status === "ready" && /Ajustes/.test(iaFila?.nextAction ?? ""),
+    `status=${guardarIa.res.status} ${JSON.stringify(iaFila)}`
+  );
+
+  const conectar = await api("/api/settings/whatsapp", {
+    method: "PUT",
+    body: JSON.stringify({ wabaId: "WABA-E2E", phoneNumberId: PN, token: "tok-e2e" }),
+  });
+  ok(
+    "paso 3: conectar el número lo deja listo",
+    conectar.res.ok && (await paso("whatsapp"))?.status === "ready",
+    `status=${conectar.res.status}`
+  );
+
+  if (agenda) {
+    const cerrado = await paso("calendar");
+    ok(
+      "agenda: con todos los días cerrados sigue pendiente",
+      cerrado?.status === "pending" && cerrado?.href === "/settings/calendar",
+      JSON.stringify(cerrado)
+    );
+    await api("/api/calendar/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        connector: "zoom",
+        weeklyHours: { mon: [{ start: "09:00", end: "18:00" }] },
+      }),
+    });
+    const zoomSinCred = await paso("calendar");
+    ok(
+      "agenda: Zoom elegido sin credencial → pendiente, y la pista lo dice",
+      zoomSinCred?.status === "pending" && /Zoom/.test(zoomSinCred?.problem ?? ""),
+      JSON.stringify(zoomSinCred)
+    );
+    const horario = await api("/api/calendar/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        connector: "enlace-fijo",
+        weeklyHours: {
+          mon: [{ start: "09:00", end: "18:00" }],
+          tue: [{ start: "09:00", end: "18:00" }],
+          wed: [{ start: "09:00", end: "18:00" }],
+          thu: [{ start: "09:00", end: "18:00" }],
+          fri: [{ start: "09:00", end: "18:00" }],
+        },
+      }),
+    });
+    ok(
+      "agenda: horarios + enlace fijo lo deja listo sin credenciales de nadie",
+      horario.res.ok && (await paso("calendar"))?.status === "ready"
+    );
+  } else {
+    const noAplica = await paso("calendar");
+    ok(
+      "sin agenda el paso se reporta «no aplica» y sin enlace",
+      noAplica?.status === "not_applicable" && noAplica?.href === null,
+      JSON.stringify(noAplica)
+    );
+  }
+
+  // --- 036: sin cerebro, una bandeja manual que no queda atrapada ---
+  const manual = await estado();
+  ok(
+    "sin cerebro y lo demás listo: guía completa (el paso opcional no cuenta) y sin cerebro conectado",
+    manual?.guide?.complete === true &&
+      manual?.guide?.brainConnected === false &&
+      manual?.enabled === false,
+    JSON.stringify(manual?.guide)
+  );
+  const rManual = await raiz();
+  ok(
+    "…y la raíz manda a la Bandeja: la guía no atrapa a una bandeja manual",
+    mandaA("/inbox")(rManual),
+    rManual
+  );
+  const htmlManual = await pantallaHtml();
+  ok(
+    "la tarjeta final dice «bandeja manual» y no ofrece encender",
+    htmlManual.includes("Vocero funciona como bandeja manual") && !htmlManual.includes("Encender a Sofi"),
+    htmlManual.includes("Encender a Sofi") ? "ofrece encender" : "sin el texto de bandeja manual"
+  );
+  const sinCerebro = await api("/api/agent/profile", {
+    method: "PUT",
+    body: JSON.stringify({ enabled: true }),
+  });
+  ok(
+    "encender sin un cerebro que conteste → 409 sin_cerebro",
+    sinCerebro.res.status === 409 && sinCerebro.json?.error?.code === "sin_cerebro",
+    `${sinCerebro.res.status} ${JSON.stringify(sinCerebro.json)}`
+  );
+
+  // --- 036: se conecta el cerebro ---
+  await cerebro.encender();
+  let cerebroListo = null;
+  await hasta(async () => {
+    cerebroListo = await paso("brain");
+    return cerebroListo?.status === "ready";
+  }, 25_000, 1000);
+  ok(
+    "con el cerebro contestando su /health, «Conecta tu agente» queda listo con su versión",
+    cerebroListo?.status === "ready" && /2\.0\.0-e2e/.test(cerebroListo?.nextAction ?? ""),
+    JSON.stringify(cerebroListo)
+  );
+
+  // --- Encender ---
+  const listo = await estado();
+  ok(
+    "con todo listo: guía completa, cerebro conectado y agente todavía apagado",
+    listo?.guide?.complete === true && listo?.guide?.brainConnected === true && listo?.enabled === false,
+    JSON.stringify(listo?.guide)
+  );
+  const r1 = await raiz();
+  ok("…y la raíz SIGUE mandando a /onboarding: falta encenderlo", mandaA("/onboarding")(r1), r1);
+  const htmlListo = await pantallaHtml();
+  ok(
+    "la tarjeta final ofrece «Encender a Sofi» (el nombre, ya configurado)",
+    htmlListo.includes("Enciende a Sofi") && htmlListo.includes("Encender a Sofi")
+  );
+
+  const encender = await encenderAgente(api);
+  ok(
+    "Encender → PUT /api/agent/profile {enabled:true}",
+    encender.res.ok,
+    `${encender.res.status} ${JSON.stringify(encender.json)}`
+  );
+  const encendido = await estado();
+  ok("…y la guía lo refleja", encendido?.enabled === true && encendido?.guide?.enabled === true);
+  const r2 = await raiz();
+  ok("con todo listo y encendido la raíz manda a la Bandeja", mandaA("/inbox")(r2), r2);
+  const htmlEncendido = await pantallaHtml();
+  ok(
+    "la guía sigue disponible y dice que Sofi ya está contestando",
+    htmlEncendido.includes("Sofi ya está contestando") && htmlEncendido.includes("Ir a la Bandeja")
+  );
+
+  // --- Como estaba, para lo que sigue (el cerebro falso sigue escuchando) ---
+  await apagarAgente(api);
+  // Sin la fila, el resto del guion sigue hablando con el ai-mock por el
+  // respaldo del entorno, como antes de esta sección.
+  await api("/api/settings/ai", { method: "DELETE" });
+}
+
+/* ============================================================
+ * us5 — Guardar la conexión registra el webhook en Meta y respeta el
+ * override de un cerebro externo (tests/e2e/us5-connect.md, pasos 3, 4, 4b,
+ * 7 y 8)
+ *
+ * Antes, guardar dejaba al operador a medias: el token era válido y se podía
+ * enviar, pero no llegaba nada hasta que alguien pegaba la URL en el panel de
+ * su app de Meta. Ahora el CRM la registra él mismo, como override del
+ * NÚMERO, y «Meta» (el wa-mock) hace el handshake de verdad contra la ruta.
+ *
+ * Y lo de siempre: en Meta, `POST {WABA}/subscribed_apps` SIN cuerpo es la
+ * forma documentada de BORRAR el override de callback de la WABA, y el CRM lo
+ * mandaba en cada "Guardar": un cerebro externo (Nea) que recibe los webhooks
+ * por ese override quedaba sordo sin que nada lo avisara. El override del
+ * número ganaría igual, así que con uno ajeno en la WABA el CRM no lo pone.
+ * El wa-mock se comporta como Meta, así que si el CRM vuelve a pisar a
+ * ciegas, esto se pone rojo.
  * ============================================================ */
 
 async function overrideChecks() {
-  console.log("\n== us5: guardar la conexión no desconecta a un cerebro externo ==");
+  console.log("\n== us5: guardar registra el webhook y no desconecta a un cerebro externo ==");
   const WABA = "WABA-E2E";
   const NEA = "https://nea.e2e.test/api/webhooks/meta";
   const graph = `/api/dev/wa-mock/graph/v25.0/${WABA}/subscribed_apps`;
@@ -1566,13 +1926,17 @@ async function overrideChecks() {
   const overrideActual = async () =>
     (await suscripcion()).find((app) => app.override_callback_uri)
       ?.override_callback_uri ?? null;
+  /** El override que «Meta» tiene en el NÚMERO (lo que el CRM registra). */
+  const webhookDelNumero = async () =>
+    (await api("/api/dev/wa-mock/webhooks")).json?.phoneWebhooks?.[PN] ?? null;
   const guardar = (token) =>
     api("/api/settings/whatsapp", {
       method: "PUT",
       body: JSON.stringify({ wabaId: WABA, phoneNumberId: PN, token }),
     });
+  const urlPropia = (await api("/api/settings/webhook")).json?.url ?? null;
 
-  // Modo directo: sin override, guardar suscribe la app, como siempre.
+  // Modo directo: sin override, guardar suscribe la app, como siempre…
   let guardado = await guardar("tok-e2e");
   const trasGuardar = await suscripcion();
   ok(
@@ -1582,6 +1946,42 @@ async function overrideChecks() {
       !trasGuardar[0]?.override_callback_uri,
     JSON.stringify({ status: guardado.res.status, trasGuardar })
   );
+  // …y registra el webhook de la instancia en el número (pasó el handshake).
+  ok(
+    "y registra el webhook de la instancia en el NÚMERO (handshake incluido)",
+    guardado.json?.webhook?.ok === true &&
+      guardado.json.webhook.appWithoutWebhook === false &&
+      !!urlPropia &&
+      (await webhookDelNumero()) === urlPropia,
+    JSON.stringify({ webhook: guardado.json?.webhook, urlPropia, enMeta: await webhookDelNumero() })
+  );
+
+  // El botón «Registrar en Meta» lo repite con la conexión guardada.
+  const boton = await api("/api/settings/webhook", { method: "POST" });
+  ok(
+    "«Registrar en Meta» repite el registro sin volver a pegar el token",
+    boton.res.ok && boton.json?.ok === true && (await webhookDelNumero()) === urlPropia,
+    JSON.stringify(boton.json)
+  );
+
+  // Un token sin whatsapp_business_management: Meta rechaza el registro, la
+  // conexión se guarda igual y el motivo viaja en la respuesta.
+  const sinGestion = await guardar("tok-e2e-sin-gestion");
+  ok(
+    "sin permiso de gestión, la conexión se guarda (200) y avisa por qué no registró",
+    sinGestion.res.ok &&
+      sinGestion.json?.webhook?.ok === false &&
+      sinGestion.json.webhook.code === "missing_permission",
+    JSON.stringify({ status: sinGestion.res.status, webhook: sinGestion.json?.webhook })
+  );
+  const botonSinGestion = await api("/api/settings/webhook", { method: "POST" });
+  ok(
+    "y el botón devuelve el mismo motivo con 422",
+    botonSinGestion.res.status === 422 &&
+      botonSinGestion.json?.error?.code === "missing_permission",
+    JSON.stringify(botonSinGestion.json)
+  );
+  await guardar("tok-e2e");
 
   // El cerebro externo fija SU override contra Meta (lo que hace Nea).
   const fijado = await api(graph, {
@@ -1610,6 +2010,15 @@ async function overrideChecks() {
     despues === NEA,
     `override=${despues}`
   );
+  // El override del número gana al de la WABA: con uno ajeno, el CRM no pone
+  // el suyo y quita el que había dejado el guardado anterior.
+  ok(
+    "y el número queda SIN override propio: el cerebro externo sigue recibiendo",
+    guardado.json?.webhook?.skipped === "waba_override" &&
+      guardado.json.webhook.host === "nea.e2e.test" &&
+      (await webhookDelNumero()) === null,
+    JSON.stringify({ webhook: guardado.json?.webhook, enMeta: await webhookDelNumero() })
+  );
 
   // Control del propio mock: un POST sin cuerpo SÍ borra el override, como en
   // Meta. Sin esto, el check anterior podría pasar contra un mock permisivo.
@@ -1619,8 +2028,27 @@ async function overrideChecks() {
     (await overrideActual()) === null
   );
 
-  // El resto del guion sigue con la conexión de siempre.
+  // Desconectar: quita el override del número en Meta ANTES de soltar el
+  // token, y la bandeja no se toca. Luego el guion sigue con la conexión de
+  // siempre.
   await guardar("tok-e2e");
+  const antesDeSoltar = await webhookDelNumero();
+  const soltar = await api("/api/settings/whatsapp", { method: "DELETE" });
+  const sinConexion = (await api("/api/settings/whatsapp")).json?.connection;
+  ok(
+    "desconectar borra la conexión y quita el override del número en Meta",
+    soltar.res.ok &&
+      antesDeSoltar === urlPropia &&
+      sinConexion === null &&
+      (await webhookDelNumero()) === null,
+    JSON.stringify({ status: soltar.res.status, antesDeSoltar, sinConexion, enMeta: await webhookDelNumero() })
+  );
+  const reconectado = await guardar("tok-e2e");
+  ok(
+    "y volver a guardar lo deja registrado otra vez",
+    reconectado.res.ok && (await webhookDelNumero()) === urlPropia,
+    JSON.stringify(reconectado.json)
+  );
 }
 
 /* ============================================================
@@ -1725,7 +2153,7 @@ async function agendaChecks() {
       from: LEAD_A,
       name: "Lead agenda A",
       text: "quiero agendar",
-      waMessageId: `wamid.e2e.015.a.1.${RUN}`,
+      waMessageId: "wamid.e2e.015.a.1",
     }),
   });
   const LEAD_B = "5214627015002";
@@ -1736,7 +2164,7 @@ async function agendaChecks() {
       from: LEAD_B,
       name: "Lead agenda B",
       text: "yo también quiero",
-      waMessageId: `wamid.e2e.015.b.1.${RUN}`,
+      waMessageId: "wamid.e2e.015.b.1",
     }),
   });
   await sleep(1500);
@@ -1746,31 +2174,6 @@ async function agendaChecks() {
   const convB = convsAgenda.find((c) => c.contact.phone === "524627015002");
   ok("dos conversaciones de prueba listas", Boolean(convA && convB));
   if (!convA || !convB) return;
-
-  // El calendario es un recurso FINITO y esta sección lo consume: cada corrida
-  // reserva huecos y no los devuelve. Contra una BD ya usada eso rompe de dos
-  // formas distintas: `booking.next` devuelve la cita de la corrida anterior en
-  // vez de la recién creada, y los huecos de mañana se agotan hasta que R10
-  // pide la tarde y ya no quedan tres.
-  //
-  // Se cancelan TODAS las citas activas, no solo las de convA/convB: las
-  // reservan varias conversaciones distintas a lo largo del bloque. La sección
-  // es dueña del calendario de la organización de pruebas —el arnés registra
-  // su propio operador y corre contra los mocks—, así que puede dejarlo en un
-  // estado conocido antes de empezar. Sin esto, el bloque solo pasa contra una
-  // BD virgen.
-  const activas = ((await api("/api/bookings")).json?.bookings ?? []).filter(
-    (b) => b.status === "agendada"
-  );
-  for (const b of activas) {
-    await api(`/api/bookings/${b.id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ action: "cancel" }),
-    });
-  }
-  if (activas.length) {
-    console.log(`  (limpieza: ${activas.length} cita(s) de corridas previas canceladas)`);
-  }
 
   const ofertaA = await bot(
     `/api/bot/availability?conversationId=${convA.id}&limit=12&perDay=3&days=5`
@@ -1946,113 +2349,13 @@ async function agendaChecks() {
   }
 
   /**
-   * El agujero de INTEGRACIÓN del issue #50.
-   *
-   * Todo lo de arriba entra por `/api/bot/*`, donde quien llama YA tiene el
-   * ISO. El agente EMBEBIDO no lo tenía: al modelo solo le llegaban el prompt
-   * y el historial de TEXTO, con las etiquetas que leyó el cliente y sin año,
-   * zona ni fecha de hoy. Acertar el instante era suerte, el rechazo caía en
-   * `slot_not_offered` —de texto fijo— y la conversación repetía la lista
-   * para siempre.
-   *
-   * Y por eso este self-test no lo cazaba: el resto de 015 ejercita el
-   * gateway, nunca la conversación. Aquí hay que ENCENDER el agente
-   * in-process a propósito, y apagarlo después para no alterar lo que sigue.
+   * 036 — Aquí estaba «el agente reserva desde la conversación (#50)»: el
+   * agente INCLUIDO tenía que traducir la etiqueta que leyó el cliente al
+   * instante ISO a partir del mapa de huecos de su prompt. Ese agente ya no
+   * existe; un cerebro reserva por `/api/bot/availability` y
+   * `/api/bot/bookings`, donde el ISO le llega en la respuesta: lo cubren las
+   * garantías de arriba (US3) y R10 (huecos por fecha) en este mismo guion.
    */
-  console.log("\n== 015: el agente reserva desde la conversación (#50) ==");
-  {
-    await api("/api/agent/profile", {
-      method: "PUT",
-      body: JSON.stringify({ enabled: true }),
-    });
-    const encendido = await api("/api/agent/profile");
-    ok(
-      "el agente in-process queda encendido para esta prueba",
-      encendido.json?.profile?.enabled === true,
-      JSON.stringify(encendido.json?.profile?.enabled)
-    );
-
-    /**
-     * Contacto NUEVO en cada corrida.
-     *
-     * Con un teléfono fijo, la segunda ejecución arrastra la conversación y —
-     * sobre todo— las OFERTAS de la anterior: el mapa ya está ahí desde el
-     * primer mensaje y el agente reserva antes de ofrecer, así que el check
-     * mide otra cosa. El resto del guion asume base recién sembrada; esta
-     * sección no puede permitírselo porque compara ANTES y DESPUÉS.
-     */
-    const CORRIDA = Date.now().toString().slice(-6);
-    const LEAD_C = `5214627${CORRIDA}`;
-    const decir = (texto, n) =>
-      api("/api/dev/wa-mock/inbound", {
-        method: "POST",
-        body: JSON.stringify({
-          phoneNumberId: PN,
-          from: LEAD_C,
-          name: "Lead agenda C",
-          text: texto,
-          // Único por corrida: con un id fijo, la segunda ejecución lo
-          // deduplica en la ingesta y no entra NADA — el agente no llega a
-          // correr y el check falla sin que haya nada roto.
-          waMessageId: `wamid.e2e.015.c.${CORRIDA}.${n}`,
-        }),
-      });
-
-    await decir("quiero agendar una cita", 1);
-    await hasta(async () => {
-      const cs = (await api("/api/conversations")).json?.conversations ?? [];
-      return cs.some((c) => c.contact.phone === `524627${CORRIDA}`);
-    });
-
-    const convs = (await api("/api/conversations")).json?.conversations ?? [];
-    const convC = convs.find((c) => c.contact.phone === `524627${CORRIDA}`);
-    ok("el agente atendió al lead que pide cita", Boolean(convC));
-
-    if (convC) {
-      const salientesDe = async () => {
-        const msgs =
-          (await api(`/api/conversations/${convC.id}/messages`)).json
-            ?.messages ?? [];
-        return msgs.filter((m) => m.direction === "out");
-      };
-
-      // El agente tiene que RESPONDER; cuánto tarde no es asunto del check.
-      await hasta(async () => (await salientesDe()).length > 0);
-      const trasOferta = await salientesDe();
-      ok(
-        "el agente OFRECE horarios (hay respuesta, no silencio)",
-        trasOferta.length > 0 && /\d{2}:\d{2}/.test(trasOferta.at(-1)?.text ?? ""),
-        `salientes=${trasOferta.length} ultimo=${(trasOferta.at(-1)?.text ?? "").slice(0, 80)}`
-      );
-
-      const antes = (await api("/api/bookings")).json?.bookings ?? [];
-      await decir("quiero el primero", 2);
-      await hasta(async () => {
-        const bs = (await api("/api/bookings")).json?.bookings ?? [];
-        return bs.length > antes.length;
-      });
-
-      const despues = (await api("/api/bookings")).json?.bookings ?? [];
-      ok(
-        "elegir un horario CREA la cita (no repite la lista)",
-        despues.length > antes.length,
-        `citas antes=${antes.length} despues=${despues.length}`
-      );
-
-      /**
-       * Aquí había una tercera comprobación —«confirma en vez de volver a
-       * ofrecer»— y se quitó: pasaba TAMBIÉN con el bug puesto, porque bajo el
-       * fallo el agente responde cualquier otra cosa que tampoco contiene
-       * «estos horarios». Una comprobación que no distingue el fallo del
-       * acierto solo da confianza falsa. Lo que decide es la cita creada.
-       */
-    }
-
-    await api("/api/agent/profile", {
-      method: "PUT",
-      body: JSON.stringify({ enabled: false }),
-    });
-  }
 
   console.log("\n== 015: el operador y el enlace pendiente (US4) ==");
   const bookingId = creada.json?.bookingId;
@@ -2285,7 +2588,7 @@ async function huecosPorFechaChecks() {
       phoneNumberId: PN,
       from: `5214629${SUF}`,
       name: "Lead R10 tarde",
-      // Sin palabras que disparen al agente incluido a ofrecer o reservar.
+      // Sin palabras que un cerebro tomaría por una reserva (aquí no hay ninguno encendido).
       text: "¿tienen algo mañana en la tarde?",
       waMessageId: `wamid.e2e.r10.${SUF}.1`,
     }),
@@ -2384,8 +2687,9 @@ async function huecosPorFechaChecks() {
   );
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error("ERROR FATAL:", err);
+  await limpiar();
   process.exit(1);
 });
 
@@ -2782,39 +3086,6 @@ async function atribucionChecks() {
 }
 
 /* ============================================================
- * Cabeceras de seguridad (tests/e2e/us-cabeceras-seguridad.md)
- *
- * Se comprueban contra una respuesta REAL y en varias superficies: si
- * viviesen en etiquetas del proxy, un despliegue de Coolify las borraría y
- * nadie se enteraría. Aquí fallan ruidosamente.
- * ============================================================ */
-
-async function cabecerasChecks() {
-  console.log("\n== cabeceras de seguridad ==");
-
-  const esperadas = {
-    "x-frame-options": "DENY",
-    "x-content-type-options": "nosniff",
-    "referrer-policy": "strict-origin-when-cross-origin",
-    "strict-transport-security": "max-age=31536000",
-    "permissions-policy": "camera=(), microphone=(), geolocation=()",
-  };
-
-  // La pública (sin sesión) y una de la app: las cabeceras son para TODA
-  // respuesta, no solo para las que pasan por el layout autenticado.
-  for (const ruta of ["/login", "/api/health"]) {
-    const res = await fetch(`${BASE}${ruta}`, { headers: { origin: BASE } });
-    for (const [k, v] of Object.entries(esperadas)) {
-      ok(
-        `${ruta}: ${k}`,
-        res.headers.get(k) === v,
-        `esperado "${v}", recibido "${res.headers.get(k)}"`
-      );
-    }
-  }
-}
-
-/* ============================================================
  * 018 — De qué anuncio llegó cada conversación (tests/e2e/us-atribucion.md)
  *
  * Corre con la bandera ATRIBUCION apagada Y encendida: el origen del anuncio
@@ -3187,42 +3458,12 @@ async function r11BotChecks() {
   ok("un BSUID que nadie tiene sigue en 404", nadie.res.status === 404, `status=${nadie.res.status}`);
 
   /*
-   * 3. Pedir cita con la agenda apagada no termina en "Error del proveedor
-   *    de IA": el ai-mock ya no ofrece horarios que el prompt no le enseñó
-   *    (el esquema del turno los rechazaba y el agente traspasaba).
+   * 3. (036: retirado) «Pedir cita con la agenda apagada no termina en
+   *    "Error del proveedor de IA"» probaba el esquema del turno del agente
+   *    incluido y la rama de agenda del ai-mock; los dos se fueron con él. Qué
+   *    contesta un cerebro a una cita sin agenda es asunto del cerebro (Nea
+   *    lo prueba en su repo); el CRM solo ve `booking` ausente en el contexto,
+   *    que se comprueba arriba (us-bot-api: contexto conversacional).
    */
-  const agenda = /^(on|1|true|si|sí|yes)$/i.test((process.env.AGENDA ?? "").trim());
-  console.log(`\n== R11: pedir cita con la agenda ${agenda ? "encendida" : "apagada"} ==`);
-  await api("/api/agent/profile", { method: "PUT", body: JSON.stringify({ enabled: true }) });
-  const CANON_CITA = `524630${RUN}`;
-  await inbound({
-    from: `5214630${RUN}`,
-    name: `R11 Cita ${RUN}`,
-    text: "hola, ¿dan citas el sábado?",
-    waMessageId: `wamid.e2e.r11.cita.${RUN}`,
-  });
-  const salientesCita = async () => {
-    const c = await convDe(CANON_CITA);
-    return c ? (await mensajesDe(c.id)).filter((m) => m.direction === "out") : [];
-  };
-  await hasta(
-    async () =>
-      Boolean((await convDe(CANON_CITA))?.handoffAt) || (await salientesCita()).length > 0,
-    25000
-  );
-  const convCita = await convDe(CANON_CITA);
-  const salientes = await salientesCita();
-  ok(
-    "el agente contesta y NO traspasa por «Error del proveedor de IA»",
-    !convCita?.handoffAt && salientes.some((m) => m.origin === "ai"),
-    JSON.stringify({ reason: convCita?.handoffReason, salientes: salientes.map((m) => m.text) })
-  );
-  if (!agenda) {
-    ok(
-      "con la agenda apagada no ofrece horarios",
-      !salientes.some((m) => /horario/i.test(m.text ?? "")),
-      JSON.stringify(salientes.map((m) => m.text))
-    );
-  }
-  await api("/api/agent/profile", { method: "PUT", body: JSON.stringify({ enabled: false }) });
 }
+

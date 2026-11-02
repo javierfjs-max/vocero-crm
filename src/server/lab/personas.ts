@@ -1,5 +1,5 @@
 /**
- * Las 6 personas GUIONADAS del Laboratorio (FR-030). El cliente simulado no
+ * Las personas GUIONADAS del Laboratorio (FR-030). El cliente simulado no
  * usa LLM: son secuencias fijas — determinismo total del lado del cliente.
  * El agente que responde es el REAL (mismo pipeline de US3).
  */
@@ -93,6 +93,30 @@ export const PERSONAS: Persona[] = [
       "cuanto x el galon d pintura blanca pa interiores",
       "va, orita paso x la tienda, sale",
     ],
+  },
+  // 033 — Las dos que faltaban para probar los frenos del agente: la
+  // hostilidad sostenida (debe cerrar con dignidad y escalar) y la
+  // conversación que no va a ningún lado (debe despedirse y dejar de seguir).
+  {
+    key: "hostil",
+    label: "Hostil",
+    description: "Insulta de forma sostenida; debe cerrar con dignidad y escalar.",
+    phone: "5210000000007",
+    contactName: "[Prueba] Hostil",
+    script: [
+      "Oye, esto es una estafa o qué",
+      "Puro humo, bots chafas que no sirven para nada",
+      "Ya párenle, son unos estafadores, no les creo nada",
+      "Qué me ves, contesta algo que sirva",
+    ],
+  },
+  {
+    key: "sin_rumbo",
+    label: "Sin rumbo",
+    description: "Solo manda relleno; debe despedirse y dejar de perseguir.",
+    phone: "5210000000008",
+    contactName: "[Prueba] Sin rumbo",
+    script: ["Hola", "ok", "jaja", "👍", "ok gracias", "sale"],
   },
 ];
 

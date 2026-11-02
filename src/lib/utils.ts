@@ -7,11 +7,18 @@ export function cn(...inputs: ClassValue[]) {
 
 /** Iniciales (máx 2) para el avatar de un contacto. */
 export function initials(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
+  // 028 — La primera letra o cifra de cada palabra. Los nombres de Instagram y
+  // Facebook traen emojis («Kevin Belier 🐏», «Vivir con virtud ⚖️»): tomar el
+  // primer carácter partía el emoji a la mitad («K�») o lo usaba de inicial.
+  const parts = name
+    .trim()
+    .split(/\s+/)
+    .map((w) => w.match(/[\p{L}\p{N}]/u)?.[0])
+    .filter((c): c is string => Boolean(c));
   if (parts.length === 0) return "?";
-  const first = parts[0]?.[0] ?? "";
-  const second = parts.length > 1 ? (parts[parts.length - 1]?.[0] ?? "") : "";
-  return (first + second).toUpperCase() || "?";
+  const first = parts[0] ?? "";
+  const second = parts.length > 1 ? (parts[parts.length - 1] ?? "") : "";
+  return (first + second).toUpperCase();
 }
 
 /* Paleta de los avatares del mockup de la landing (hsl(h 62% 52%)): tonos

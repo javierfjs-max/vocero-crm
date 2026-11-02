@@ -1,14 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Cable, Plus, Sparkles, Trash2 } from "lucide-react";
+import Link from "next/link";
+import { Plus, Sparkles, Trash2 } from "lucide-react";
 import { BrainStatusCard } from "@/components/agent/brain-status-card";
-import {
-  externalAnswerLabel,
-  externalAnswering,
-  externalDown,
-  type BrainStatusDto,
-} from "@/lib/brain-status";
+import { externalDown, type BrainStatusDto } from "@/lib/brain-status";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -16,6 +12,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  HERRAMIENTAS,
+  ROLES,
+  type ClaveHerramienta,
+} from "@/lib/agent-roles";
 
 type Profile = {
   enabled: boolean;
@@ -24,6 +25,9 @@ type Profile = {
   instructions: string | null;
   escalationRules: string | null;
   greeting: string | null;
+  /** 034 */
+  role: string;
+  tools: ClaveHerramienta[];
 };
 
 type KbEntry = {
@@ -37,9 +41,14 @@ type KbEntry = {
 export function AgentClient() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [aiConfigured, setAiConfigured] = useState(true);
+  const [aiMensaje, setAiMensaje] = useState<string | null>(null);
   const [entries, setEntries] = useState<KbEntry[]>([]);
   const [kbSize, setKbSize] = useState<{ chars: number; warnAt: number; warning: boolean } | null>(null);
   const [saved, setSaved] = useState(false);
+  // 036 — Por qué no se pudo encender (409 `sin_cerebro`): el mensaje del
+  // servidor, tal cual, junto al interruptor.
+  const [switchError, setSwitchError] = useState<string | null>(null);
+  const [agendaEnabled, setAgendaEnabled] = useState(false);
   // «Quién responde»: se refresca solo, porque la última llamada del cerebro
   // externo y su /health cambian sin que nadie toque esta pantalla.
   const [brain, setBrain] = useState<BrainStatusDto | null>(null);
@@ -61,6 +70,8 @@ export function AgentClient() {
     if (p) {
       setProfile(p.profile);
       setAiConfigured(p.aiConfigured);
+      setAiMensaje(p.aiMensaje ?? null);
+      setAgendaEnabled(p.agendaEnabled === true);
     }
     if (kb) setEntries(kb.entries);
     if (size) setKbSize(size);
@@ -83,27 +94,58 @@ export function AgentClient() {
     );
   }
 
-  async function saveProfile(patch: Partial<Profile>) {
-    await fetch("/api/agent/profile", {
-      method: "PUT",
+  async function cargarPreset() {
+    const ok = window.confirm(
+      `Cargar el rol «${ROLES.calificador.etiqueta}» reemplaza las instrucciones y las reglas de escalado, y enciende todas sus herramientas. ¿Continuar?`
+    );
+    if (!ok) return;
+    await fetch("/api/agent/profile/preset", {
+      method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(patch),
+      body: JSON.stringify({ role: "calificador" }),
     }).catch(() => null);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
     void refetch();
   }
 
-  // Sin token de IA, este aviso pedía configurarlo aunque contestara un
-  // cerebro externo, y eso mentía. Con uno contestando, se dice eso; con uno
-  // caído, ya lo dice la tarjeta de arriba.
-  const aiCallout = aiConfigured
-    ? null
-    : brain && externalAnswering(brain)
-      ? "externo"
-      : brain && externalDown(brain)
-        ? null
-        : "configurar";
+  async function saveProfile(patch: Partial<Profile>): Promise<boolean> {
+    const res = await fetch("/api/agent/profile", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch),
+    }).catch(() => null);
+    if (!res?.ok) {
+      const data = (await res?.json().catch(() => null)) as {
+        error?: { message?: string };
+      } | null;
+      if (patch.enabled !== undefined) {
+        setSwitchError(
+          data?.error?.message ??
+            (patch.enabled ? "No se pudo encender el agente." : "No se pudo apagar el agente.")
+        );
+      }
+      void refetch();
+      return false;
+    }
+    if (patch.enabled !== undefined) setSwitchError(null);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+    void refetch();
+    return true;
+  }
+
+  // 036 — El interruptor solo se enciende con un agente conectado (el
+  // servidor lo exige igual: 409 `sin_cerebro`). Apagarlo se puede siempre:
+  // un perfil que quedó encendido sin cerebro no debe quedarse atrapado.
+  const brainConnected = brain?.dispatch.active === true;
+  const switchDisabled = !profile.enabled && brain !== null && !brainConnected;
+
+  // 036 — Sin llave de IA el agente conectado no tiene con qué pensar (piensa
+  // por el CRM, `/api/bot/llm`). Sin agente conectado no hace falta pedirla:
+  // la bandeja manual no la usa. Con el agente caído ya lo dice la tarjeta.
+  const aiCallout =
+    !aiConfigured && brainConnected && brain && !externalDown(brain);
 
   return (
     <div className="h-full overflow-y-auto">
@@ -117,13 +159,28 @@ export function AgentClient() {
           {/* El interruptor compartido (#53): el pomo propio de aquí era
               `absolute` sin `left`, arrancaba del centro de la pista y
               encendido quedaba afuera. */}
+          {/* Encender exige IA; APAGAR se puede siempre. Con la llave pausada
+              (#85) el agente sigue «encendido» sin poder pensar, y un
+              interruptor bloqueado dejaría al dueño sin forma de callarlo. */}
           <Switch
             checked={profile.enabled}
-            disabled={!aiConfigured}
+            disabled={switchDisabled}
             label="Agente encendido"
             onCheckedChange={(enabled) => void saveProfile({ enabled })}
           />
         </div>
+        {(switchError || switchDisabled) && (
+          <p
+            role={switchError ? "alert" : undefined}
+            className={
+              switchError
+                ? "w-full text-right text-xs text-danger-text"
+                : "w-full text-right text-xs text-muted-foreground"
+            }
+          >
+            {switchError ?? "Se enciende cuando conectes tu agente."}
+          </p>
+        )}
       </header>
 
       {brain && (
@@ -132,35 +189,102 @@ export function AgentClient() {
         </div>
       )}
 
-      {aiCallout === "externo" && brain && (
-        <div className="mx-4 mt-4 rounded-lg border border-brand-soft bg-brand-tint p-5 text-center sm:mx-6 sm:mt-6 sm:p-6">
-          <Cable className="mx-auto mb-2 h-8 w-8 text-primary" strokeWidth={1.7} />
-          <p className="font-medium">{externalAnswerLabel(brain)}</p>
-          <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
-            No necesitas el agente incluido: el comportamiento y el conocimiento
-            que dejes aquí abajo quedan disponibles para tu cerebro externo por
-            la API.
-          </p>
-        </div>
-      )}
-      {aiCallout === "configurar" && (
+      {aiCallout && (
         <div className="mx-4 mt-4 rounded-lg border border-brand-soft bg-brand-tint p-5 text-center sm:mx-6 sm:mt-6 sm:p-6">
           <Sparkles className="mx-auto mb-2 h-8 w-8 text-primary" />
-          <p className="font-medium">Configura tu proveedor de IA para activar el agente</p>
-          <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
-            Agrega <code className="rounded bg-secondary px-1">OPENROUTER_API_TOKEN</code> y{" "}
-            <code className="rounded bg-secondary px-1">OPENROUTER_MODEL</code> a las variables
-            de entorno de la instancia y reiníciala. Mientras tanto puedes dejar listo el
-            comportamiento y el conocimiento aquí abajo.
+          <p className="font-medium">
+            {aiMensaje ? "Tu agente no puede pensar" : "Tu agente no tiene con qué pensar"}
           </p>
+          <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
+            {aiMensaje ??
+              "Piensa a través del CRM con la llave de Ajustes → IA: elige el proveedor, el modelo y pega tu llave, sin reiniciar nada."}{" "}
+            (Si tu agente usa su propia llave, puedes ignorar este aviso.)
+          </p>
+          <Link
+            href="/settings/ai"
+            className="mt-3 inline-block text-sm font-medium text-brand-text underline underline-offset-2"
+          >
+            Ir a Ajustes → IA →
+          </Link>
         </div>
       )}
 
       <div className="grid gap-4 p-4 sm:gap-6 sm:p-6 lg:grid-cols-2">
+        <RolSection
+          profile={profile}
+          agendaEnabled={agendaEnabled}
+          onTools={(tools) => void saveProfile({ tools })}
+          onPreset={() => void cargarPreset()}
+        />
         <ProfileSection profile={profile} onSave={saveProfile} />
         <KbSection entries={entries} kbSize={kbSize} onChanged={() => void refetch()} />
       </div>
     </div>
+  );
+}
+
+/**
+ * 034 — El rol y sus herramientas. Las respeta el agente conectado (Nea); el
+ * CRM se las entrega en su perfil (`/api/bot/profile`).
+ */
+function RolSection({
+  profile,
+  agendaEnabled,
+  onTools,
+  onPreset,
+}: {
+  profile: Profile;
+  agendaEnabled: boolean;
+  onTools: (tools: ClaveHerramienta[]) => void;
+  onPreset: () => void;
+}) {
+  const rol = ROLES[profile.role as keyof typeof ROLES] ?? ROLES.calificador;
+  const visibles = HERRAMIENTAS.filter((h) => !h.agenda || agendaEnabled);
+  const encendida = (clave: ClaveHerramienta) => profile.tools.includes(clave);
+  function cambiar(clave: ClaveHerramienta, on: boolean) {
+    const siguiente = on
+      ? [...profile.tools, clave]
+      : profile.tools.filter((t) => t !== clave);
+    onTools(siguiente);
+  }
+
+  return (
+    <Card className="lg:col-span-2">
+      <CardHeader>
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <CardTitle>
+              Rol: {rol.etiqueta}
+            </CardTitle>
+            <CardDescription>{rol.descripcion}</CardDescription>
+          </div>
+          <Button variant="outline" size="sm" onClick={onPreset}>
+            Cargar el rol {rol.etiqueta}
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <ul className="grid gap-3 sm:grid-cols-2">
+          {visibles.map((h) => (
+            <li key={h.clave} className="flex items-start justify-between gap-3 rounded-md border p-3">
+              <div>
+                <p className="text-sm font-medium">{h.etiqueta}</p>
+                <p className="text-xs text-muted-foreground">{h.descripcion}</p>
+              </div>
+              <Switch
+                checked={h.fija ? true : encendida(h.clave)}
+                disabled={h.fija === true}
+                label={h.etiqueta}
+                onCheckedChange={(on) => cambiar(h.clave, on)}
+              />
+            </li>
+          ))}
+        </ul>
+        <p className="text-xs text-muted-foreground">
+          El agente toma los cambios en unos minutos, sin redesplegar nada.
+        </p>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -169,7 +293,7 @@ function ProfileSection({
   onSave,
 }: {
   profile: Profile;
-  onSave: (patch: Partial<Profile>) => Promise<void>;
+  onSave: (patch: Partial<Profile>) => Promise<boolean>;
 }) {
   const [form, setForm] = useState(profile);
   useEffect(() => setForm(profile), [profile]);
@@ -229,7 +353,17 @@ function ProfileSection({
             onChange={(e) => setForm({ ...form, greeting: e.target.value })}
           />
         </div>
-        <Button onClick={() => void onSave(form)}>Guardar comportamiento</Button>
+        <Button
+          onClick={() => {
+            // 034 — Solo lo de esta tarjeta: el formulario guarda una copia
+            // del perfil de cuando se abrió, y mandarla entera pisaría las
+            // herramientas cambiadas después en la tarjeta del rol.
+            const { name, tone, instructions, escalationRules, greeting } = form;
+            void onSave({ name, tone, instructions, escalationRules, greeting });
+          }}
+        >
+          Guardar comportamiento
+        </Button>
       </CardContent>
     </Card>
   );

@@ -4,9 +4,10 @@ Precondición: app corriendo con mocks (`WA_MOCK_ENABLED=true`,
 `META_GRAPH_BASE_URL` → wa-mock), organización creada, conexión WhatsApp
 guardada y `BOT_API_KEY` configurada (≥16 caracteres).
 
-Esta superficie NO la usa el navegador: la usa un bot propio del operador que
-quiere conducir la conversación sin que el token de WhatsApp salga del CRM. El
-agente in-process de Vocero puede quedar apagado.
+Esta superficie NO la usa el navegador: la usa el cerebro (Nea o un bot propio
+del operador), que conduce la conversación sin que el token de WhatsApp salga
+del CRM. Desde la 036 es la única forma de que alguien conteste solo: el CRM no
+trae agente.
 
 ## Autorización
 
@@ -57,9 +58,12 @@ edita el dueño (Agente y su knowledge base). Este endpoint es el contrato.
     los bloques tal cual, en el orden de la pantalla). Con el KB vacío viaja
     la cadena canónica `(knowledge base vacío)`, no `null`: el bot puede
     inyectarla en su prompt sin ramificar.
-16. `profile.enabled` NO viene, ni con la IA in-process encendida ni apagada:
-    ese flag gobierna el agente de Vocero, no al cerebro externo, que se pausa
-    por conversación (`aiEnabled` y los handoffs).
+16. `profile.enabled` NO viene, ni con el interruptor encendido ni apagado:
+    ese flag decide si el CRM despacha (036), y el cerebro se pausa por
+    conversación (`aiEnabled` y los handoffs).
+    036 — `llm` viene con `{path: "/api/bot/llm", model: <el de Ajustes →
+    IA>}`; sin IA configurada (ni en Ajustes → IA ni en el entorno), `llm:
+    null`.
 17. Editar el tono en la pantalla Agente y volver a pedir el perfil → el cambio
     ya está: la respuesta no se cachea.
 
@@ -147,7 +151,8 @@ Para los pasos del `/health`, la app corre con `BRAIN_HEALTH_URL` apuntando a
 un puerto local donde el guion levanta una Nea falsa (con credenciales y query
 de prueba en la URL).
 
-40. Sin sesión → **401**. Con sesión → `embedded`, `external` y `warning`;
+40. Sin sesión → **401**. Con sesión → `enabled`, `aiConfigured`, `external`,
+    `dispatch` y `warning` (sin `embedded`: 036);
     `external.keyConfigured: true` (hay `BOT_API_KEY`).
 41. Una llamada a `/api/bot/*` con key equivocada NO mueve
     `external.lastSeenAt`; `GET /api/bot/context` con la key sí, y el cerebro
@@ -157,11 +162,30 @@ de prueba en la URL).
     ni la query de la URL aparecen en la respuesta (a Nea sí le llegan, como
     `Authorization: Basic`). Tres consultas seguidas = cero pedidos nuevos a
     Nea (caché de 15 s).
-43. Con token de IA y el agente incluido encendido → `warning:
-    "doble_respuesta"` y el aviso rojo en la tarjeta. Apagarlo lo quita.
+43. **036** `doble_respuesta` ya no existe. Sin despacho → `warning:
+    "sin_cerebro"` y la tarjeta dice «bandeja manual», sin rojo. Con
+    despacho y el interruptor apagado → `warning: "apagado"`; encenderlo lo
+    quita.
 44. Con la Nea falsa colgada: en ≤ 4 s la consulta vuelve con
     `reachable: false`, `problem: "timeout"`; la llamada reciente la sigue
     contando como activa.
-45. En la bandeja, con el cerebro externo activo y el agente incluido
-    apagado, el panel dice «Responde tu cerebro externo (Nea)» en vez de
-    pedir la clave de IA.
+45. En la bandeja, el panel del contacto dice quién contesta: con el cerebro
+    activo y el interruptor encendido, «Responde tu cerebro externo (Nea)»;
+    con el cerebro conectado y el interruptor apagado, «Tu agente está
+    conectado pero apagado: contestas tú»; sin cerebro, «Bandeja manual: sin
+    agente conectado, contestas tú». En ningún caso pide la clave de IA.
+
+## Pensar por el CRM (`/api/bot/llm`, 036)
+
+El cerebro apunta el `base_url` de su SDK de OpenAI a `/api/bot/llm` y el CRM
+le pone la llave de Ajustes → IA. Con `OPENROUTER_BASE_URL` → ai-mock.
+
+46. `POST /api/bot/llm/chat/completions` sin llave → **401**.
+47. Con `X-API-Key` y, aparte, con `Authorization: Bearer <BOT_API_KEY>` → la
+    respuesta del ai-mock tal cual, con su código. El mock recibió la llave de
+    Ajustes → IA, no la `BOT_API_KEY`.
+48. Con el proveedor respondiendo 401: la respuesta vuelve con 401 y Ajustes →
+    IA queda pausada (el banner lo dice). Guardar la llave otra vez la
+    reactiva.
+49. Sin IA configurada (o pausada) → **402** `sin_credencial`.
+50. La llave de IA no aparece en ninguna respuesta ni en el log de la app.

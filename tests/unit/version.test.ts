@@ -166,6 +166,8 @@ describe("un commit que no salió del build se presenta como NO verificado", () 
   });
 
   describe("/api/health", () => {
+    // Aquí solo importa el commit: la forma completa (con `features` y
+    // `mediaWritable`, #82) se prueba en tests/unit/health.test.ts.
     // Cada caso re-importa la ruta con `resetModules` (lee el entorno al
     // importarse): en una corrida cargada eso puede pasar de los 5 s de
     // serie, y una prueba que expira sigue corriendo detrás de la siguiente.
@@ -191,7 +193,7 @@ describe("un commit que no salió del build se presenta como NO verificado", () 
           NEXT_PUBLIC_BUILD_COMMIT: "73e93c1bbbb",
           SOURCE_COMMIT: "52c5034aaaa",
         })
-      ).toEqual({ ok: true, version: "1.3.0", commit: "73e93c1", commitVerified: true });
+      ).toMatchObject({ ok: true, version: "1.3.0", commit: "73e93c1", commitVerified: true });
     }, IMPORT_FRESCO_MS);
 
     it("commit solo del entorno → sale, pero con commitVerified: false", async () => {
@@ -202,17 +204,18 @@ describe("un commit que no salió del build se presenta como NO verificado", () 
           NEXT_PUBLIC_BUILD_COMMIT: "",
           SOURCE_COMMIT: "52c5034aaaa",
         })
-      ).toEqual({ ok: true, version: "1.3.0", commit: "52c5034", commitVerified: false });
+      ).toMatchObject({ ok: true, version: "1.3.0", commit: "52c5034", commitVerified: false });
     }, IMPORT_FRESCO_MS);
 
     it("sin commit por ningún lado → solo la versión, sin afirmar nada", async () => {
-      expect(
-        await salud({
-          NEXT_PUBLIC_APP_VERSION: "1.3.0",
-          NEXT_PUBLIC_BUILD_COMMIT: "",
-          SOURCE_COMMIT: undefined,
-        })
-      ).toEqual({ ok: true, version: "1.3.0" });
+      const cuerpo = await salud({
+        NEXT_PUBLIC_APP_VERSION: "1.3.0",
+        NEXT_PUBLIC_BUILD_COMMIT: "",
+        SOURCE_COMMIT: undefined,
+      });
+      expect(cuerpo).toMatchObject({ ok: true, version: "1.3.0" });
+      expect(cuerpo).not.toHaveProperty("commit");
+      expect(cuerpo).not.toHaveProperty("commitVerified");
     }, IMPORT_FRESCO_MS);
   });
 });

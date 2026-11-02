@@ -14,6 +14,7 @@ vi.mock("@/lib/env", () => ({ getEnv }));
 vi.mock("@/lib/db", () => ({ getDb: vi.fn(), schema: {} }));
 
 import { checkMediaDir } from "@/instrumentation-node";
+import { resetMediaDirCache } from "@/server/media-dir";
 
 let tmp: string;
 let error: MockInstance<typeof console.error>;
@@ -21,6 +22,8 @@ let error: MockInstance<typeof console.error>;
 beforeEach(async () => {
   tmp = await mkdtemp(path.join(os.tmpdir(), "vocero-media-"));
   error = vi.spyOn(console, "error").mockImplementation(() => {});
+  // El sondeo se cachea (#82): cada caso arranca sin resultado anterior.
+  resetMediaDirCache();
 });
 
 afterEach(async () => {

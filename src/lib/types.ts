@@ -16,6 +16,18 @@ export type ConversationDto = {
   unreadCount: number;
   windowOpen: boolean;
   windowRemainingMs: number;
+  /**
+   * 024 — La ventana humana del canal (Instagram y Messenger:
+   * hasta 7 días con la etiqueta de agente humano). `null` en un canal que no
+   * la tiene. `open` = la ventana normal ya cerró pero una persona todavía
+   * puede contestar; `remainingMs` es lo que le queda.
+   */
+  humanWindow: { open: boolean; remainingMs: number } | null;
+  /**
+   * 028 — Lo que el compositor puede ofrecer en este canal: adjuntos, y
+   * ubicación o contacto. El servidor rechaza lo demás igual.
+   */
+  composer: { media: boolean; structured: boolean; quoteReply: boolean };
   preview: string | null;
   /** 018: el anuncio que abrió la conversación, para la marca de la lista. */
   anuncio: {
@@ -75,7 +87,23 @@ export type MessageDto = {
   /** 008 — Origen del saliente (en entrantes viene 'operator' y se ignora). */
   origin: "ai" | "operator" | "manual" | "template";
   media: MessageMediaDto | null;
+  /** 039 — Tiene id en la plataforma: se le puede responder citando. */
+  quotable: boolean;
+  /** 039 — El mensaje que cita, o null si no cita ninguno. */
+  replyTo: QuotedMessageDto | null;
   createdAt: string;
+};
+
+/**
+ * 039 — Lo que se enseña de un mensaje citado. Con `id: null` el original no
+ * está en el CRM (anterior a la instalación o de un tipo que no se guarda).
+ */
+export type QuotedMessageDto = {
+  id: string | null;
+  direction: "in" | "out" | null;
+  type: string | null;
+  text: string | null;
+  mediaKind: string | null;
 };
 
 export type TemplateDto = {
@@ -120,6 +148,8 @@ export type ContactDto = {
   priority?: PriorityValue | null;
   /** Lo que se sabe del lead. `{}` mientras nadie haya calificado. */
   ficha?: FichaDto;
+  /** 027 — El agente no le responde a esta persona: la atiende el dueño. */
+  aiPaused?: boolean;
 };
 
 /* ============================================================
