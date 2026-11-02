@@ -4,6 +4,7 @@ import { useMemo } from "react";
 import { AlertTriangle, CalendarDays, Sparkles, Video } from "lucide-react";
 import { bookingSegments, hhmm, longDayLabel, spanLabel, type DateRange } from "@/lib/time/calendar";
 import { cn } from "@/lib/utils";
+import { EmptyState } from "@/components/ui/empty-state";
 import { STATUS_LABEL, bookingTitle, bookingTone, hasDeliveryIssue, type Booking } from "./booking-look";
 
 /**
@@ -44,14 +45,12 @@ export function AgendaList({
 
   if (groups.length === 0) {
     return (
-      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 rounded-lg border bg-card p-8 text-center">
-        <CalendarDays className="h-8 w-8 text-text-4" strokeWidth={1.5} />
-        <p className="text-sm font-semibold">Nada agendado del {spanLabel(range)}</p>
-        <p className="max-w-sm text-sm text-text-3">
-          Aquí aparecen las citas que agenda la IA o tu equipo. El horario que se
-          ofrece se configura en Ajustes → Agenda.
-        </p>
-      </div>
+      <EmptyState
+        icon={CalendarDays}
+        className="min-h-0 flex-1 rounded-lg border bg-card p-8"
+        title={`Nada agendado del ${spanLabel(range)}`}
+        description="Aquí aparecen las citas que agenda la IA o tu equipo. El horario que se ofrece se configura en Ajustes → Agenda."
+      />
     );
   }
 

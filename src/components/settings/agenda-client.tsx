@@ -177,12 +177,12 @@ export function AgendaClient() {
             const intervals = settings.weeklyHours[day.key] ?? [];
             const open = intervals.length > 0;
             return (
-              <div key={day.key} className="flex items-start gap-3">
+              <div key={day.key} className="flex flex-col gap-1.5 sm:flex-row sm:items-start sm:gap-3">
                 <button
                   type="button"
                   onClick={() => toggleDay(day.key)}
                   className={cn(
-                    "mt-1 w-24 shrink-0 rounded-sm px-2 py-1 text-left text-sm font-medium transition-colors",
+                    "w-24 shrink-0 rounded-sm px-2 py-1 text-left text-sm font-medium transition-colors sm:mt-1",
                     open
                       ? "bg-brand-tint text-brand-text"
                       : "text-text-3 hover:bg-accent"
@@ -200,7 +200,7 @@ export function AgendaClient() {
                         onChange={(e) =>
                           setIntervalAt(day.key, i, { start: e.target.value })
                         }
-                        className="w-28"
+                        className="min-w-0 flex-1 sm:w-36 sm:flex-none"
                       />
                       <span className="text-text-3">a</span>
                       <Input
@@ -209,7 +209,7 @@ export function AgendaClient() {
                         onChange={(e) =>
                           setIntervalAt(day.key, i, { end: e.target.value })
                         }
-                        className="w-28"
+                        className="min-w-0 flex-1 sm:w-36 sm:flex-none"
                       />
                       <button
                         type="button"

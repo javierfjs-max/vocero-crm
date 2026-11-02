@@ -1,6 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
 import { newId } from "@/lib/db/ids";
+import { scoped } from "@/lib/db/tenant";
 import { normalizeMx } from "@/lib/meta/client";
 import { publish } from "@/server/events/bus";
 import { getCredentialsByPhoneNumberId } from "@/server/whatsapp/credentials";
@@ -23,7 +24,14 @@ import {
 } from "@/server/attribution/referral";
 import { registrarAnuncioDeOrigen } from "@/server/attribution/store";
 import { onLeadActivity } from "@/server/inbox/lead-activity";
-import { maybeRunAgentTurn } from "@/server/ai/trigger";
+import { despachoActivo } from "@/server/brains/config";
+import { despacharAlCerebro } from "@/server/dispatch/encolar";
+import {
+  aCitaDto,
+  citaDelWebhook,
+  resolverCita,
+  type CitaEncontrada,
+} from "@/server/inbox/quotes";
 
 /** Tipos de contenido soportados; el resto se ignora sin error. */
 const SUPPORTED_TYPES = new Set([
@@ -36,6 +44,42 @@ const SUPPORTED_TYPES = new Set([
   "location",
   "contacts",
 ]);
+
+/** #78 — Respuestas de botón: entran como texto (ver `contenidoEntrante`). */
+const BUTTON_REPLY_TYPES = new Set(["button", "interactive"]);
+
+/**
+ * #78 — Lo que escribió el cliente, también cuando lo hizo tocando un botón.
+ *
+ * Cuando el cliente toca un botón de respuesta rápida de una plantilla, Meta
+ * manda `type: "button"` con el rótulo en `button.text`; cuando toca un botón
+ * o una fila de lista de un mensaje interactivo, `type: "interactive"` con el
+ * rótulo en `interactive.button_reply.title` o `interactive.list_reply.title`.
+ * Para el negocio eso es un texto del cliente: entra a la bandeja, abre la
+ * ventana de 24 h y dispara al agente igual que si lo hubiera tecleado. Se
+ * guarda como `text` con el rótulo; el `payload`/`id` del botón no, porque el
+ * mensaje no tiene campo para metadatos y el rótulo es lo que el cliente vio y
+ * eligió. Devuelve null si la respuesta no trae ni rótulo ni identificador
+ * (payload roto): quien llama la descarta con aviso, nunca revienta el webhook.
+ */
+export function contenidoEntrante(
+  msg: WebhookMessage
+): { type: string; text: string | null } | null {
+  if (msg.type === "button") {
+    const rotulo = limpio(msg.button?.text) ?? limpio(msg.button?.payload);
+    return rotulo ? { type: "text", text: rotulo } : null;
+  }
+  if (msg.type === "interactive") {
+    const reply = msg.interactive?.button_reply ?? msg.interactive?.list_reply;
+    const rotulo = limpio(reply?.title) ?? limpio(reply?.id);
+    return rotulo ? { type: "text", text: rotulo } : null;
+  }
+  return { type: msg.type, text: msg.text?.body ?? null };
+}
+
+function limpio(valor: unknown): string | null {
+  return typeof valor === "string" && valor.trim() ? valor.trim() : null;
+}
 
 /** Tipos con archivo binario en Graph (008). */
 const BINARY_MEDIA_TYPES = new Set([
@@ -138,7 +182,10 @@ async function attachMediaAsset(
       .where(eq(schema.message.id, messageId));
     if (asset.fetchStatus === "pending") {
       // Descarga in-process, sin bloquear la ingesta; on-demand reintenta.
-      void ensureAssetAvailable(organizationId, asset.id).catch(() => {});
+      // 044: al terminar se avisa a la bandeja, que pintó «descargando…».
+      void ensureAssetAvailable(organizationId, asset.id)
+        .then(() => avisarAdjuntoListo(organizationId, messageId, asset.id))
+        .catch(() => {});
     }
     return asset;
   } catch (err) {
@@ -180,6 +227,10 @@ export async function getOrCreateConversation(
       contactId,
       channel: opts?.channel ?? "whatsapp",
       channelThreadRef: opts?.threadRef ?? null,
+      // 027: hereda la pausa del contacto en el mismo INSERT. Si se leyera
+      // antes, cada mensaje entrante pagaría una consulta más, y entre la
+      // lectura y la inserción cabría el primer turno del agente.
+      aiEnabled: sql<boolean>`coalesce((select not c.ai_paused from contact c where c.id = ${contactId}), true)`,
     })
     .onConflictDoNothing()
     .returning();
@@ -236,7 +287,16 @@ export async function processMessagesValue(value: WebhookValue): Promise<void> {
   }
 
   for (const msg of value.messages ?? []) {
-    if (!SUPPORTED_TYPES.has(msg.type)) continue; // reacciones, etc.: ignorar
+    if (!SUPPORTED_TYPES.has(msg.type) && !BUTTON_REPLY_TYPES.has(msg.type)) {
+      continue; // reacciones, etc.: ignorar
+    }
+    const contenido = contenidoEntrante(msg);
+    if (!contenido) {
+      console.warn(
+        `[webhook] respuesta de botón ${msg.id} (${msg.type}) sin rótulo ni identificador: descartada`
+      );
+      continue;
+    }
     const resolved = resolveIdentity(msg, value.contacts);
     if (!resolved) {
       // Mensaje sin NINGUNA identidad utilizable (ni teléfono ni BSUID):
@@ -250,10 +310,11 @@ export async function processMessagesValue(value: WebhookValue): Promise<void> {
       organizationId,
       identity: resolved,
       waMessageId: msg.id,
-      type: msg.type,
-      text: msg.text?.body ?? null,
+      type: contenido.type,
+      text: contenido.text,
       timestamp: msg.timestamp,
       media: mediaInputFrom(msg),
+      replyToWaMessageId: citaDelWebhook(msg),
       // 018: normalizado aquí, en el adaptador del canal; la ingesta no sabe
       // de qué forma lo mandó Meta.
       anuncio: anuncioDeWhatsapp(msg.referral),
@@ -327,6 +388,8 @@ async function ingestManualEcho(
       text: echo.text?.body ?? null,
       status: "sent",
       origin: "manual",
+      // 039: el dueño también cita desde el teléfono.
+      replyToWaMessageId: citaDelWebhook(echo),
       waTimestamp,
     })
     .onConflictDoNothing({ target: [schema.message.waMessageId] })
@@ -371,7 +434,11 @@ async function ingestManualEcho(
     type: "message.new",
     data: {
       conversationId: conversation.id,
-      message: serializeMessage(message, asset),
+      message: serializeMessage(
+        message,
+        asset,
+        await resolverCita(organizationId, message)
+      ),
     },
   });
   publish(organizationId, {
@@ -388,6 +455,8 @@ export async function ingestInboundMessage(input: {
   text: string | null;
   timestamp: string;
   media?: MediaInput | null;
+  /** 039: `wamid` del mensaje que el cliente citó, si citó alguno. */
+  replyToWaMessageId?: string | null;
   /** 014: hilo en la plataforma de origen (Zernio); null en WhatsApp. */
   threadRef?: string | null;
   /** 016/018: el anuncio que abrió la conversación, ya normalizado por el canal. */
@@ -444,6 +513,7 @@ export async function ingestInboundMessage(input: {
       type: input.type,
       text: input.text,
       status: "delivered",
+      replyToWaMessageId: input.replyToWaMessageId ?? null,
       waTimestamp,
     })
     .onConflictDoNothing({ target: [schema.message.waMessageId] })
@@ -471,7 +541,11 @@ export async function ingestInboundMessage(input: {
     type: "message.new",
     data: {
       conversationId: conversation.id,
-      message: serializeMessage(message, asset),
+      message: serializeMessage(
+        message,
+        asset,
+        await resolverCita(organizationId, message)
+      ),
     },
   });
   publish(organizationId, {
@@ -479,7 +553,9 @@ export async function ingestInboundMessage(input: {
     data: { conversation: { id: conversation.id } },
   });
 
-  await maybeRunAgentTurn(conversation.id);
+  // 036 — Quien contesta es el cerebro conectado; sin él, una persona. El
+  // 025: `message.id` es lo que el despacho le debe al cerebro.
+  if (despachoActivo()) await despacharAlCerebro(conversation.id, organizationId, message.id);
 }
 
 function toDate(timestamp: string): Date {
@@ -488,9 +564,38 @@ function toDate(timestamp: string): Date {
   return new Date();
 }
 
+/**
+ * 044 — Publica el estado final del adjunto (disponible o fallido) para que la
+ * burbuja deje de decir «descargando…» sin recargar.
+ */
+async function avisarAdjuntoListo(
+  organizationId: string,
+  messageId: string,
+  assetId: string
+): Promise<void> {
+  const db = getDb();
+  const [fila] = await db
+    .select({ message: schema.message, asset: schema.mediaAsset })
+    .from(schema.message)
+    .innerJoin(schema.mediaAsset, eq(schema.mediaAsset.id, assetId))
+    .where(scoped(schema.message.organizationId, organizationId, eq(schema.message.id, messageId)))
+    .limit(1);
+  if (!fila || fila.asset.fetchStatus === "pending") return;
+  publish(organizationId, {
+    type: "message.media",
+    data: {
+      conversationId: fila.message.conversationId,
+      messageId,
+      media: serializeMessage(fila.message, fila.asset).media,
+    },
+  });
+}
+
 export function serializeMessage(
   m: typeof schema.message.$inferSelect,
-  media: typeof schema.mediaAsset.$inferSelect | null = null
+  media: typeof schema.mediaAsset.$inferSelect | null = null,
+  /** 039: el mensaje citado ya resuelto (`resolverCitas`); null si no está. */
+  cita: CitaEncontrada | null = null
 ) {
   return {
     id: m.id,
@@ -515,6 +620,9 @@ export function serializeMessage(
           payload: media.payload,
         }
       : null,
+    /** 039: se le puede responder citando (tiene id en la plataforma). */
+    quotable: Boolean(m.waMessageId),
+    replyTo: m.replyToWaMessageId ? aCitaDto(cita) : null,
     createdAt: (m.waTimestamp ?? m.createdAt).toISOString(),
   };
 }

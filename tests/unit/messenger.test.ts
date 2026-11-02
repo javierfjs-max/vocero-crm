@@ -64,7 +64,8 @@ describe("017 · Messenger en el catálogo de canales", () => {
     expect(caps.outboundMedia).toBe(false);
     expect(caps.deliveryReceipts).toBe(false);
     // Fuera de ventana no se le pide nada al operador: sale etiquetado solo.
-    expect(windowClosedMessage("messenger")).toBe("");
+    // 024: la extensión humana tiene tope (7 días) y su propio mensaje.
+    expect(windowClosedMessage("messenger")).toContain("7 días");
   });
 
   it("el límite de texto es de 2000 y se cuenta en BYTES", () => {
@@ -325,7 +326,8 @@ describe("017 · reparto de Zernio por plataforma (un webhook, varios canales)",
   });
 
   it("una plataforma que Vocero no atiende no es de nadie", () => {
-    for (const platform of ["whatsapp", "x", "tiktok", "linkedin", ""]) {
+    // 022: `tiktok` salió de esta lista: ya es un canal (tests/unit/tiktok.test.ts).
+    for (const platform of ["whatsapp", "x", "twitter", "linkedin", ""]) {
       expect(zernioTargetChannel(zernioEvent({ account: { id: ACCOUNT, platform } }))).toBeNull();
     }
     expect(zernioTargetChannel(null)).toBeNull();

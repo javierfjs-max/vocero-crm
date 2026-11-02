@@ -10,8 +10,8 @@ import { markBotSeen } from "@/server/bot/status";
  * Esta superficie NO la consume el navegador: la consume un cerebro externo
  * (un microservicio propio del operador, en su mismo servidor) que quiere
  * conducir la conversación sin que el token de WhatsApp salga del CRM.
- * Header `X-API-Key` contra `BOT_API_KEY` (env), comparación en tiempo
- * constante. Sin `BOT_API_KEY` configurada, toda la superficie responde 401.
+ * Header `X-API-Key` (o `Authorization: Bearer`) contra `BOT_API_KEY` (env),
+ * comparación en tiempo constante. Sin `BOT_API_KEY` configurada, toda la superficie responde 401.
  *
  * Primero se autentica y DESPUÉS se cuenta. Antes había un solo cubo global
  * contado antes de mirar la key: 600 requests anónimos por minuto dejaban al
@@ -46,8 +46,21 @@ export const BOT_API_BUDGET = { windowMs: 60_000, max: 1200 };
  */
 export const BOT_AUTH_FAILURES = { windowMs: 60_000, max: 30 };
 
+/**
+ * 036 — La llave llega en `X-API-Key` o, para `/api/bot/llm`, como
+ * `Authorization: Bearer`: es lo que manda el SDK de OpenAI del cerebro, que
+ * apunta su `base_url` al CRM y no sabe de cabeceras propias.
+ */
+function llaveDe(req: Request): string | null {
+  const directa = req.headers.get("x-api-key");
+  if (directa) return directa;
+  const auth = req.headers.get("authorization");
+  const m = auth ? /^Bearer\s+(.+)$/i.exec(auth.trim()) : null;
+  return m?.[1] ?? null;
+}
+
 export function requireBotKey(req: Request): Response | null {
-  if (!validBotKey(req.headers.get("x-api-key"))) {
+  if (!validBotKey(llaveDe(req))) {
     const ip = clientIp(req.headers);
     const fails = checkRateLimit(`bot-api-fail:${ip}`, BOT_AUTH_FAILURES);
     return fails.allowed

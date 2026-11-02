@@ -1,7 +1,12 @@
+import {
+  MAX_TEXT_CHARS_ANY_CHANNEL,
+  TEXT_TOO_LONG_ANY_CHANNEL,
+} from "@/server/channels/capabilities";
 import { z } from "zod";
 import { apiError, parseBody, withAuth } from "@/lib/api";
 import { getConversation, listMessages } from "@/server/inbox/queries";
 import { serializeMessage } from "@/server/inbox/ingest";
+import { resolverCitas } from "@/server/inbox/quotes";
 import { SendError, sendStructured, sendText } from "@/server/inbox/send";
 
 export const dynamic = "force-dynamic";
@@ -21,17 +26,36 @@ export const GET = withAuth(async (session, req: Request, ctx: Params) => {
     id,
     since && !Number.isNaN(since.getTime()) ? since : undefined
   );
+  // 039: las citas del hilo se resuelven en un solo query.
+  const citas = await resolverCitas(
+    session.organizationId,
+    messages.map((r) => r.message)
+  );
   return Response.json({
-    messages: messages.map((r) => serializeMessage(r.message, r.media)),
+    messages: messages.map((r) =>
+      serializeMessage(
+        r.message,
+        r.media,
+        r.message.replyToWaMessageId
+          ? citas.get(r.message.replyToWaMessageId) ?? null
+          : null
+      )
+    ),
   });
 });
+
+// 039: id LOCAL del mensaje al que se responde citando (opcional).
+const replyToMessageId = z.string().trim().min(1).max(64).optional();
 
 // 008: además de texto, el body acepta ubicación y contactos (discriminado
 // por `type`; sin `type` sigue siendo texto — compat con clientes previos).
 const sendSchema = z.union([
   z.object({
     type: z.literal("text").optional(),
-    text: z.string().trim().min(1).max(4096),
+    // 022: el tope de aquí es el del canal que más admite; el de cada
+    // canal lo comprueba el envío (`text_too_long`).
+    text: z.string().trim().min(1).max(MAX_TEXT_CHARS_ANY_CHANNEL, TEXT_TOO_LONG_ANY_CHANNEL),
+    replyToMessageId,
   }),
   z.object({
     type: z.literal("location"),
@@ -41,6 +65,7 @@ const sendSchema = z.union([
       name: z.string().trim().max(1000).optional(),
       address: z.string().trim().max(1000).optional(),
     }),
+    replyToMessageId,
   }),
   z.object({
     type: z.literal("contacts"),
@@ -53,6 +78,7 @@ const sendSchema = z.union([
       )
       .min(1)
       .max(5),
+    replyToMessageId,
   }),
 ]);
 
@@ -61,9 +87,12 @@ const SEND_ERROR_STATUS: Record<SendError["code"], number> = {
   not_connected: 409,
   reconnect_required: 409,
   window_closed: 409,
+  message_limit: 409,
+  text_too_long: 422,
   meta_error: 422,
   meta_unavailable: 503,
   upload_failed: 502,
+  reply_unavailable: 422,
 };
 
 export const POST = withAuth(async (session, req: Request, ctx: Params) => {
@@ -79,6 +108,7 @@ export const POST = withAuth(async (session, req: Request, ctx: Params) => {
             conversationId: id,
             organizationId: session.organizationId,
             text: data.text,
+            replyToMessageId: data.replyToMessageId,
           })
         : data.type === "location"
           ? await sendStructured({
@@ -86,12 +116,14 @@ export const POST = withAuth(async (session, req: Request, ctx: Params) => {
               organizationId: session.organizationId,
               kind: "location",
               location: data.location,
+              replyToMessageId: data.replyToMessageId,
             })
           : await sendStructured({
               conversationId: id,
               organizationId: session.organizationId,
               kind: "contacts",
               contacts: data.contacts,
+              replyToMessageId: data.replyToMessageId,
             });
     return Response.json({ messageId: result.messageId });
   } catch (err) {

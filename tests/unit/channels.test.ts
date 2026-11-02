@@ -53,8 +53,13 @@ describe("capacidades por canal", () => {
     expect(textFits("instagram", "a".repeat(1001))).toBe(false);
   });
 
-  it("WhatsApp no tiene límite práctico de texto", () => {
-    expect(textFits("whatsapp", "a".repeat(5000))).toBe(true);
+  it("WhatsApp declara su límite de 4,096 caracteres, que antes vivía en el esquema de la API", () => {
+    // 022: el tope dejó de ser uno global para todos los canales (TikTok
+    // admite 6,000), así que el de WhatsApp se declara aquí. Se cuenta en
+    // caracteres: 4,096 acentos son 8,192 bytes y caben.
+    expect(textFits("whatsapp", "a".repeat(4096))).toBe(true);
+    expect(textFits("whatsapp", "é".repeat(4096))).toBe(true);
+    expect(textFits("whatsapp", "a".repeat(5000))).toBe(false);
   });
 });
 

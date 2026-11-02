@@ -41,6 +41,8 @@ function profileRow(overrides: Partial<AgentProfile> = {}): AgentProfile {
     instructions: "Vendemos limpiezas dentales.",
     escalationRules: "Urgencias de dolor → humano.",
     greeting: "¡Hola! Soy Sofi 🦷",
+    role: "calificador",
+    tools: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
@@ -60,6 +62,20 @@ function qa(question: string, answer: string): KbEntry {
   };
 }
 
+describe("034 — role y tools en el perfil", () => {
+  it("con herramientas apagadas viajan solo las encendidas, y escalar siempre", () => {
+    const out = serializeBotProfile(profileRow({ tools: ["ficha"] }), []);
+    expect(out.profile.tools).toEqual(["ficha", "escalar"]);
+    expect(out.profile.role).toBe("calificador");
+  });
+
+  it("un rol que ya no existe cae al Calificador; claves desconocidas se ignoran", () => {
+    const out = serializeBotProfile(profileRow({ role: "vendedor", tools: ["agendar", "volar"] }), []);
+    expect(out.profile.role).toBe("calificador");
+    expect(out.profile.tools).toEqual(["agendar", "escalar"]);
+  });
+});
+
 describe("serializeBotProfile", () => {
   it("perfil completo → shape exacto del contrato", () => {
     const out = serializeBotProfile(profileRow(), [
@@ -72,10 +88,18 @@ describe("serializeBotProfile", () => {
         instructions: "Vendemos limpiezas dentales.",
         escalationRules: "Urgencias de dolor → humano.",
         greeting: "¡Hola! Soy Sofi 🦷",
+        role: "calificador",
+        tools: ["ficha", "etapa", "agendar", "reprogramar", "salida", "escalar"],
       },
       kb: "P: ¿Cuánto cuesta?\nR: $800.",
       resources: [],
+      llm: null,
     });
+  });
+
+  it("036 — llm: el proxy y el modelo del negocio cuando hay con qué pensar", () => {
+    const llm = { path: "/api/bot/llm", model: "openai/gpt-4o-mini" };
+    expect(serializeBotProfile(profileRow(), [], llm).llm).toEqual(llm);
   });
 
   it("opcionales vacíos viajan como null, no como cadenas", () => {

@@ -18,8 +18,16 @@ Query: `hub.mode=subscribe`, `hub.verify_token`, `hub.challenge`.
 2. **Capa 2** (solo si `META_APP_SECRET` configurado): validar
    `x-hub-signature-256: sha256=<hmac>` = HMAC-SHA256(app_secret, raw body). Inválida o
    ausente → `401`. Sin `META_APP_SECRET` → se omite.
-3. Responder `200 {"received":true}` SIEMPRE tras encolar/procesar — nunca 5xx por
-   errores de dominio (Meta reintenta y desactiva webhooks que fallan).
+3. **047** — Guardar el evento tal como llegó (`webhook_event`) y responder
+   `200 {"received":true}`; el procesamiento va fuera de la ruta y, si falla, se
+   reintenta (30 s, 2 min, 10 min, 1 h, 6 h; seis intentos y queda agotado, a la
+   vista en Configuración → WhatsApp). **Única excepción: `503
+   {"received":false}` si el evento no se pudo guardar** (la base no responde),
+   para que Meta reintente. Nunca 5xx por errores al procesar (Meta desactiva
+   webhooks que fallan seguido). Un evento cuyo `phone_number_id` nadie
+   conectó no se guarda: `200` y se descarta, como antes. La misma entrega dos
+   veces (mismo cuerpo) se guarda una vez. Lo mismo vale para
+   `/api/webhooks/{ig,messenger,tiktok}`.
 
 ### Payload (subset procesado)
 

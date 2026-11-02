@@ -17,21 +17,69 @@ export type ZernioSentMessage = {
   at: string;
 };
 
+/** 023: una cuenta de `GET /accounts`, con la forma real de esa API. */
+export type ZernioMockAccount = {
+  _id: string;
+  platform: string;
+  username?: string | null;
+  displayName?: string | null;
+  platformUserId?: string | null;
+  isActive?: boolean;
+  needsReconnection?: boolean;
+  platformStatus?: string | null;
+  tiktokAccountType?: string | null;
+  profileId?: { _id: string } | null;
+  metadata?: { selectedPageId?: string; selectedPageName?: string } | null;
+};
+
+/** 023: un webhook de `/webhooks/settings`. */
+export type ZernioMockWebhook = {
+  _id: string;
+  name: string;
+  url: string;
+  secret: string | null;
+  events: string[];
+  isActive: boolean;
+  accountIds: string[];
+  failureCount: number;
+  lastFiredAt: string | null;
+};
+
 type ZernioMockState = {
   seq: number;
   sent: ZernioSentMessage[];
+  /** 023 */
+  accounts: ZernioMockAccount[];
+  webhooks: ZernioMockWebhook[];
+  /** Rutas que responden 503 hasta el siguiente `_reset` (p. ej. "webhooks/settings"). */
+  down: string[];
+  /** Cuántas veces se leyó cada ruta, para afirmar sobre la caché. */
+  hits: Record<string, number>;
 };
 
 const g = globalThis as unknown as { __voceroZernioMock?: ZernioMockState };
 
 export function zernioMockState(): ZernioMockState {
-  if (!g.__voceroZernioMock) g.__voceroZernioMock = { seq: 0, sent: [] };
-  return g.__voceroZernioMock;
+  if (!g.__voceroZernioMock) {
+    g.__voceroZernioMock = { seq: 0, sent: [], accounts: [], webhooks: [], down: [], hits: {} };
+  }
+  // Un proceso que venía de antes de la 023 (recarga en caliente).
+  const s = g.__voceroZernioMock;
+  s.accounts ??= [];
+  s.webhooks ??= [];
+  s.down ??= [];
+  s.hits ??= {};
+  return s;
 }
 
 /** Vacía lo enviado. El contador NO se reinicia: ver `nextZernioMessageId`. */
 export function resetZernioMock(): void {
-  zernioMockState().sent = [];
+  // Las cuentas y los webhooks NO se vacían: son el escenario, y el arnés lo
+  // cambia con `_accounts` y `_webhooks` cuando quiere otro.
+  const s = zernioMockState();
+  s.sent = [];
+  s.down = [];
+  s.hits = {};
 }
 
 /**

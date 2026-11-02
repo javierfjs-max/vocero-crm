@@ -29,6 +29,18 @@ const prefixes = {
   adAttribution: "att",
   conversionEvent: "cve",
   capiSettings: "capi",
+  // Ajustes → IA (issue #85)
+  aiCredentials: "aicred",
+  // 021 — despacho al cerebro
+  dispatch: "dsp",
+  // 026 — el aviso de que una conversación se eliminó
+  olvido: "olv",
+  // 047 — eventos de webhook guardados antes de procesarse
+  webhookEvent: "whe",
+  // 049 — respuestas rápidas
+  quickReply: "qr",
+  // 050 — notas internas del hilo
+  conversationNote: "nota",
 } as const;
 
 export type IdKind = keyof typeof prefixes;

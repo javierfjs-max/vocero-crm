@@ -1,7 +1,8 @@
 import { and, desc, eq, gt, sql } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
 import { scoped } from "@/lib/db/tenant";
-import { isWindowOpen, windowRemainingMs } from "@/server/inbox/window";
+import { isWindowOpen, replyWindow, windowRemainingMs } from "@/server/inbox/window";
+import { capabilitiesFor, windowMsFor } from "@/server/channels/capabilities";
 import type { ConversationDto } from "@/lib/types";
 
 /**
@@ -43,10 +44,14 @@ export async function listConversations(
   since?: Date
 ): Promise<ConversationDto[]> {
   const db = getDb();
+  // 064 — `organization_id` primero: es la primera columna de
+  // `message_org_conv_idx`. Sin ella Postgres recorre TODOS los mensajes por
+  // cada conversación de la lista (segundos con unas decenas de miles).
   const previewSql = sql<string | null>`(
     select coalesce(m.text, m.type)
     from message m
-    where m.conversation_id = ${schema.conversation.id}
+    where m.organization_id = ${schema.conversation.organizationId}
+      and m.conversation_id = ${schema.conversation.id}
     order by m.created_at desc
     limit 1
   )`;
@@ -152,6 +157,12 @@ export function serializeConversation(
   stageName: string | null = null,
   anuncio: ConversationDto["anuncio"] = null
 ): ConversationDto {
+  const caps = capabilitiesFor(c.channel);
+  // 024: la extensión humana solo existe en los canales que la declaran.
+  const reply =
+    caps.humanAgentWindowMs !== null
+      ? replyWindow(c.channel, c.lastInboundAt)
+      : null;
   return {
     id: c.id,
     channel: c.channel,
@@ -163,8 +174,22 @@ export function serializeConversation(
     lastInboundAt: c.lastInboundAt?.toISOString() ?? null,
     lastMessageAt: c.lastMessageAt?.toISOString() ?? null,
     unreadCount: c.unreadCount,
-    windowOpen: isWindowOpen(c.lastInboundAt),
-    windowRemainingMs: windowRemainingMs(c.lastInboundAt),
+    // 022: la ventana es la del canal (48 h en TikTok, 24 en los demás).
+    windowOpen: isWindowOpen(c.lastInboundAt, new Date(), windowMsFor(c.channel)),
+    windowRemainingMs: windowRemainingMs(
+      c.lastInboundAt,
+      new Date(),
+      windowMsFor(c.channel)
+    ),
+    humanWindow: reply
+      ? { open: reply.humanAgentTag, remainingMs: reply.humanAgentTag ? reply.operatorRemainingMs : 0 }
+      : null,
+    composer: {
+      media: caps.outboundMedia,
+      structured: caps.structuredMessages,
+      // 039: la UI solo ofrece «Responder» donde el canal cita.
+      quoteReply: caps.quoteReplies,
+    },
     preview,
     anuncio,
   };

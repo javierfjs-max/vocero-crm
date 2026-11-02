@@ -327,7 +327,7 @@ async function descargarYGuardar(
       payload: { origen: "anuncio", sourceId },
       fetchStatus: "pending",
     });
-    const storagePath = await saveMediaFile(organizationId, assetId, descarga.data);
+    const storagePath = await saveMediaFile(organizationId, assetId, descarga.data, descarga.mimeType);
     guardado = true;
     await db
       .update(schema.mediaAsset)

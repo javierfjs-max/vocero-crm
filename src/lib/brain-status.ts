@@ -4,9 +4,8 @@
  * contacto). Solo tipos y textos: lo importan componentes de cliente, así que
  * aquí no entra nada de servidor. El cálculo vive en `server/bot/status.ts`.
  *
- * Por qué existe: el agente incluido y un cerebro externo (Nea) no se ven
- * entre sí. Si los dos están activos, el cliente recibe DOS respuestas
- * distintas al mismo mensaje, y hasta ahora nada en el CRM lo decía.
+ * Desde la 036 el CRM no trae agente: contesta el cerebro conectado (Nea u
+ * otro), y solo si el interruptor del Agente lo deja.
  */
 
 /** Los modos de Nea tal como los reporta su `/health`. */
@@ -50,28 +49,63 @@ export type BrainHealthDto = {
   relay?: BrainRelayDto;
 };
 
-export type BrainWarning = "doble_respuesta" | "sin_cerebro";
+/**
+ * 036 — `sin_cerebro`: no hay despacho configurado; la bandeja es manual
+ * (informativo, no un error). `apagado`: hay cerebro y el interruptor del
+ * Agente no deja que el CRM le despache.
+ */
+export type BrainWarning = "sin_cerebro" | "apagado";
+
+/**
+ * 021 — El despacho: el CRM le empuja cada turno al cerebro externo
+ * (`BRAIN_DISPATCH_URL`). Los hechos salen de la tabla `dispatch`, así que
+ * sobreviven a un reinicio.
+ */
+export type BrainDispatchDto = {
+  /** URL válida y `BOT_API_KEY`: el CRM está empujando turnos. */
+  active: boolean;
+  /** Solo host[:puerto]. `null` sin `BRAIN_DISPATCH_URL` o si no es una URL. */
+  host: string | null;
+  /** `url`: no es http(s) o lleva usuario y clave. `sin_llave`: falta
+   *  `BOT_API_KEY`. Con problema, el despacho NO está activo. */
+  problem: "url" | "sin_llave" | null;
+  lastDeliveredAt: string | null;
+  /** El último turno que no llegó (caducó) o que se sigue reintentando. */
+  lastFailure: { at: string; detail: string } | null;
+  /** Turnos esperando su ventana o un reintento. */
+  pending: number;
+};
+
+/** Lo que devuelve una instancia que no despacha. */
+export const SIN_DESPACHO: BrainDispatchDto = {
+  active: false,
+  host: null,
+  problem: null,
+  lastDeliveredAt: null,
+  lastFailure: null,
+  pending: 0,
+};
 
 export type BrainStatusDto = {
-  embedded: {
-    /** La instancia tiene token de IA (`OPENROUTER_API_TOKEN`). */
-    configured: boolean;
-    /** El interruptor del Agente. */
-    enabled: boolean;
-    answering: boolean;
-  };
+  /** 036 — El interruptor del Agente: el CRM le despacha al cerebro. */
+  enabled: boolean;
+  /** Hay con qué pensar: la llave de Ajustes → IA (o `OPENROUTER_API_TOKEN`
+   *  de respaldo), que el cerebro usa por `/api/bot/llm`. */
+  aiConfigured: boolean;
   external: {
     /** `BOT_API_KEY` válida: la API `/api/bot/*` está abierta. */
     keyConfigured: boolean;
     /** Última llamada autenticada a `/api/bot/*`. En memoria: se cuenta
      *  desde el último arranque del CRM. */
     lastSeenAt: string | null;
-    /** Parece estar contestando: llamó en las últimas 24 h o su `/health`
-     *  está en línea. */
+    /** Parece estar contestando: llamó en las últimas 24 h, su `/health`
+     *  está en línea, o el CRM le está despachando los turnos. */
     active: boolean;
     /** `null` si no hay `BRAIN_HEALTH_URL`: no se le pregunta a nadie. */
     health: BrainHealthDto | null;
   };
+  /** 021: el despacho del CRM al cerebro. */
+  dispatch: BrainDispatchDto;
   warning: BrainWarning | null;
 };
 
@@ -85,14 +119,13 @@ export function externalBrainName(status: BrainStatusDto): string | null {
 }
 
 /**
- * Hasta donde el CRM puede saber, el cerebro externo está contestando: está
- * activo y, si se le pregunta a su `/health`, no está caído. `active` a secas
- * sirve para el aviso de doble respuesta (mejor avisar de más); para decirle
- * al dueño «responde tu cerebro externo» hace falta esto.
+ * Hasta donde el CRM puede saber, el cerebro está contestando: el CRM le
+ * despacha (despacho activo e interruptor encendido) y, si se le pregunta a su
+ * `/health`, no está caído.
  */
 export function externalAnswering(status: BrainStatusDto): boolean {
   const h = status.external.health;
-  return status.external.active && (!healthKnown(h) || h.reachable);
+  return status.dispatch.active && status.enabled && (!healthKnown(h) || h.reachable);
 }
 
 /** Se le pregunta a su `/health` y no está en línea. */
@@ -126,4 +159,14 @@ export function haceCuanto(iso: string, now: number = Date.now()): string {
   if (h < 24) return `hace ${h} h`;
   const d = Math.floor(h / 24);
   return d === 1 ? "hace 1 día" : `hace ${d} días`;
+}
+
+/**
+ * 021 — El último turno no llegó al cerebro y desde entonces no ha llegado
+ * ninguno. Un fallo viejo, con entregas después, ya no es una alarma.
+ */
+export function despachoFallando(d: BrainDispatchDto): boolean {
+  if (!d.active || !d.lastFailure) return false;
+  if (!d.lastDeliveredAt) return true;
+  return Date.parse(d.lastFailure.at) > Date.parse(d.lastDeliveredAt);
 }

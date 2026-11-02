@@ -257,6 +257,26 @@ async function main() {
   // ------------------------------------------------------------------
   console.log("\n===== FUENTE: ZERNIO =====");
   await fetch(`${BASE}/api/dev/zernio-mock/_reset`, { method: "POST" });
+  // 023: la cuenta se resuelve contra las de la llave; el simulador las sirve.
+  await api("/api/dev/zernio-mock/_accounts", {
+    method: "POST",
+    body: JSON.stringify({
+      accounts: [
+        {
+          _id: ACCOUNT,
+          platform: "facebook",
+          displayName: "Página Demo",
+          isActive: true,
+          platformStatus: "active",
+          metadata: { selectedPageId: PAGE, selectedPageName: "Página Demo" },
+        },
+      ],
+    }),
+  });
+  await api("/api/dev/zernio-mock/_webhooks", {
+    method: "POST",
+    body: JSON.stringify({ webhooks: [] }),
+  });
 
   console.log("\n== Conexión por Zernio (validada contra su API) ==");
   const badZ = await api("/api/settings/messenger", {
@@ -265,11 +285,17 @@ async function main() {
   });
   ok("una API key que Zernio rechaza NO se guarda → 422", badZ.res.status === 422, String(badZ.res.status));
 
+  // 023: sin accountId ya no es un error (se toma la única página de la
+  // llave; lo cubre e2e-canales). Lo que no se guarda es una cuenta ajena.
   const noAccount = await api("/api/settings/messenger", {
     method: "PUT",
-    body: JSON.stringify({ source: "zernio", token: "sk_test-ok" }),
+    body: JSON.stringify({ source: "zernio", accountRef: "no-es-de-esta-llave", token: "sk_test-ok" }),
   });
-  ok("sin accountId no se puede enrutar → 422", noAccount.res.status === 422, String(noAccount.res.status));
+  ok(
+    "un accountId que no es de una página de esa llave → 422 unknown_account",
+    noAccount.res.status === 422 && noAccount.json?.error?.code === "unknown_account",
+    `${noAccount.res.status} ${JSON.stringify(noAccount.json)}`
+  );
 
   const connZ = await api("/api/settings/messenger", {
     method: "PUT",

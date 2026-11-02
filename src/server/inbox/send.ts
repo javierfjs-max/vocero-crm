@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
 import { newId } from "@/lib/db/ids";
 import { graphRequest, MetaApiError, normalizeRecipient } from "@/lib/meta/client";
@@ -9,7 +9,8 @@ import {
   markReconnectRequired,
   type Credentials,
 } from "@/server/whatsapp/credentials";
-import { isWindowOpen } from "@/server/inbox/window";
+import { isWindowOpen, replyWindow } from "@/server/inbox/window";
+import { plainSocialText } from "@/lib/social-text";
 import { IG_PREFIX } from "@/server/inbox/identity";
 import {
   getInstagramCredentialsByOrg,
@@ -24,13 +25,30 @@ import {
   type MessengerCredentials,
 } from "@/server/messenger/credentials";
 import { sendMessengerText } from "@/server/messenger/send";
+import { TT_PREFIX } from "@/server/inbox/identity";
+import {
+  getTiktokCredentialsByOrg,
+  markTiktokReconnectRequired,
+  type TiktokCredentials,
+} from "@/server/tiktok/credentials";
+import { sendTiktokText } from "@/server/tiktok/send";
+import { prepararAudioSaliente } from "@/server/whatsapp/nota-de-voz";
+import {
+  cabeOtroMensaje,
+  salientesDesdeElUltimoEntrante,
+} from "@/server/inbox/outbound-cap";
 import {
   capabilitiesFor,
+  outboundLimitMessage,
   textFits,
+  textLimitMessage,
   windowClosedMessage,
+  windowMsFor,
+  aiWindowClosedMessage,
 } from "@/server/channels/capabilities";
 import { isChannelEnabled } from "@/server/channels/enabled";
 import { serializeMessage } from "@/server/inbox/ingest";
+import { conCita, type CitaEncontrada } from "@/server/inbox/quotes";
 import {
   saveMediaFile,
   uploadGraphMedia,
@@ -44,9 +62,15 @@ export class SendError extends Error {
     | "not_connected"
     | "reconnect_required"
     | "window_closed"
+    /** 022: el canal no admite más mensajes hasta que el cliente escriba. */
+    | "message_limit"
+    /** 022: el texto no cabe en el canal de esa conversación. */
+    | "text_too_long"
     | "meta_error"
     | "meta_unavailable"
-    | "upload_failed";
+    | "upload_failed"
+    /** 039: el mensaje a citar no es de aquí, no salió a la plataforma, o el canal no cita. */
+    | "reply_unavailable";
   /** 008: presente cuando el fallo ocurrió TRAS persistir el mensaje (failed). */
   messageId?: string;
 
@@ -71,7 +95,39 @@ type SendTarget = {
   instagram?: InstagramCredentials;
   /** 017: presente solo en conversaciones de Messenger. */
   messenger?: MessengerCredentials;
+  /** 022: presente solo en conversaciones de TikTok. */
+  tiktok?: TiktokCredentials;
+  /**
+   * 024: el envío sale con la etiqueta de agente humano. Lo decide el
+   * pre-vuelo (`assertReplyWindow`), no cada canal por su cuenta.
+   */
+  humanAgentTag?: boolean;
 };
+
+/**
+ * 024 — La puerta de la ventana para los canales con extensión humana
+ * (Instagram y Messenger). Devuelve si el envío lleva la etiqueta.
+ *
+ * - Dentro de la ventana normal escribe cualquiera.
+ * - Después, y hasta el tope de la extensión, solo una persona, con la
+ *   etiqueta. La IA no: Meta reserva esa etiqueta a agentes humanos.
+ * - Pasado el tope (o sin ningún mensaje del cliente) no escribe nadie, y se
+ *   dice aquí en vez de dejar que la plataforma rechace el envío con un error
+ *   que el operador no entiende.
+ */
+function assertReplyWindow(
+  conversation: SendTarget["conversation"],
+  aiGenerated: boolean
+): boolean {
+  const w = replyWindow(conversation.channel, conversation.lastInboundAt);
+  if (!w.operatorOpen) {
+    throw new SendError("window_closed", windowClosedMessage(conversation.channel));
+  }
+  if (aiGenerated && !w.standardOpen) {
+    throw new SendError("window_closed", aiWindowClosedMessage(conversation.channel));
+  }
+  return w.humanAgentTag;
+}
 
 /**
  * Pre-flight común de todo envío por la conversación (008): existencia +
@@ -80,7 +136,9 @@ type SendTarget = {
  */
 async function prepareSend(
   conversationId: string,
-  organizationId: string
+  organizationId: string,
+  /** 024: quién escribe decide si puede usar la extensión humana. */
+  aiGenerated: boolean = false
 ): Promise<SendTarget> {
   const db = getDb();
   const rows = await db
@@ -135,7 +193,9 @@ async function prepareSend(
     const igRecipient = row.contact.waIdentity.startsWith(IG_PREFIX)
       ? row.contact.waIdentity.slice(IG_PREFIX.length)
       : row.contact.waIdentity;
+    const humanAgentTag = assertReplyWindow(row.conversation, aiGenerated);
     return {
+      humanAgentTag,
       conversation: row.conversation,
       credentials: null,
       // Instagram no pasa por la Graph API de WhatsApp; el campo existe para
@@ -171,13 +231,66 @@ async function prepareSend(
     const fbRecipient = row.contact.waIdentity.startsWith(FB_PREFIX)
       ? row.contact.waIdentity.slice(FB_PREFIX.length)
       : row.contact.waIdentity;
+    const humanAgentTag = assertReplyWindow(row.conversation, aiGenerated);
     return {
+      humanAgentTag,
       conversation: row.conversation,
       credentials: null,
       // Messenger tampoco pasa por la Graph API de WhatsApp.
       destinatario: { to: fbRecipient },
       recipient: fbRecipient,
       messenger: fbCreds,
+    };
+  }
+
+  // 022: TikTok. Transporte propio (Zernio) y los dos límites que ningún otro
+  // canal tiene: la ventana no se puede reabrir, y admite un número contado de
+  // mensajes desde el último entrante. Los dos se preguntan a las capacidades
+  // y se comprueban AQUÍ, antes de llamar a nadie: el envío que la plataforma
+  // rechazaría no sale, y falla con un motivo que el operador entiende.
+  if (row.conversation.channel === "tiktok") {
+    if (!isChannelEnabled("tiktok")) {
+      throw new SendError(
+        "not_connected",
+        "El canal de TikTok está desactivado en esta instancia"
+      );
+    }
+    const ttCreds = await getTiktokCredentialsByOrg(organizationId);
+    if (!ttCreds) {
+      throw new SendError("not_connected", "No hay cuenta de TikTok conectada");
+    }
+    if (ttCreds.status === "reconnect_required") {
+      throw new SendError(
+        "reconnect_required",
+        "La llave de Zernio dejó de servir: reconecta TikTok en Configuración"
+      );
+    }
+    if (
+      !isWindowOpen(
+        row.conversation.lastInboundAt,
+        new Date(),
+        windowMsFor("tiktok")
+      )
+    ) {
+      throw new SendError("window_closed", windowClosedMessage("tiktok"));
+    }
+    const enviados = await salientesDesdeElUltimoEntrante(
+      organizationId,
+      conversationId
+    );
+    if (!cabeOtroMensaje("tiktok", enviados)) {
+      throw new SendError("message_limit", outboundLimitMessage("tiktok"));
+    }
+    const ttRecipient = row.contact.waIdentity.startsWith(TT_PREFIX)
+      ? row.contact.waIdentity.slice(TT_PREFIX.length)
+      : row.contact.waIdentity;
+    return {
+      conversation: row.conversation,
+      credentials: null,
+      // TikTok tampoco pasa por la Graph API de WhatsApp.
+      destinatario: { to: ttRecipient },
+      recipient: ttRecipient,
+      tiktok: ttCreds,
     };
   }
 
@@ -234,6 +347,55 @@ async function prepareSend(
   return { conversation: row.conversation, credentials, destinatario, recipient };
 }
 
+/**
+ * 039 — El mensaje al que se responde citando, validado ANTES de enviar: de
+ * esta conversación, con id en la plataforma y en un canal que cita. Si no,
+ * no se envía: mandarlo sin la cita en silencio haría creer al operador que
+ * el cliente verá a qué responde.
+ */
+async function resolverMensajeCitado(
+  target: SendTarget,
+  replyToMessageId: string | undefined
+): Promise<CitaEncontrada | null> {
+  if (!replyToMessageId) return null;
+  const caps = capabilitiesFor(target.conversation.channel);
+  if (!caps.quoteReplies) {
+    throw new SendError(
+      "reply_unavailable",
+      `${caps.label} no permite responder citando un mensaje`
+    );
+  }
+  const rows = await getDb()
+    .select({ message: schema.message, media: schema.mediaAsset })
+    .from(schema.message)
+    .leftJoin(
+      schema.mediaAsset,
+      eq(schema.message.mediaAssetId, schema.mediaAsset.id)
+    )
+    .where(
+      and(
+        eq(schema.message.organizationId, target.conversation.organizationId),
+        eq(schema.message.conversationId, target.conversation.id),
+        eq(schema.message.id, replyToMessageId)
+      )
+    )
+    .limit(1);
+  const row = rows[0];
+  if (!row) {
+    throw new SendError(
+      "reply_unavailable",
+      "El mensaje que quieres citar no es de esta conversación"
+    );
+  }
+  if (!row.message.waMessageId) {
+    throw new SendError(
+      "reply_unavailable",
+      "Ese mensaje no llegó a WhatsApp, así que no se puede citar"
+    );
+  }
+  return row;
+}
+
 async function persistOutbound(input: {
   organizationId: string;
   conversationId: string;
@@ -253,6 +415,8 @@ async function persistOutbound(input: {
   origin: "ai" | "operator";
   mediaAssetId?: string | null;
   media?: typeof schema.mediaAsset.$inferSelect | null;
+  /** 039: el mensaje citado, ya validado por `resolverMensajeCitado`. */
+  cita?: CitaEncontrada | null;
 }): Promise<string> {
   const db = getDb();
   const inserted = await db
@@ -270,6 +434,7 @@ async function persistOutbound(input: {
       aiGenerated: input.aiGenerated ?? false,
       origin: input.origin,
       mediaAssetId: input.mediaAssetId ?? null,
+      replyToWaMessageId: input.cita?.message.waMessageId ?? null,
     })
     .returning();
   const message = inserted[0]!;
@@ -283,7 +448,7 @@ async function persistOutbound(input: {
     type: "message.new",
     data: {
       conversationId: input.conversationId,
-      message: serializeMessage(message, input.media ?? null),
+      message: serializeMessage(message, input.media ?? null, input.cita ?? null),
     },
   });
 
@@ -296,27 +461,60 @@ export async function sendText(input: {
   organizationId: string;
   text: string;
   aiGenerated?: boolean;
+  /** 039: id local del mensaje al que se responde citando. */
+  replyToMessageId?: string;
 }): Promise<SendResult> {
-  const target = await prepareSend(input.conversationId, input.organizationId);
+  const target = await prepareSend(
+    input.conversationId,
+    input.organizationId,
+    input.aiGenerated ?? false
+  );
   const { credentials } = target;
+  const canal = target.conversation.channel;
+
+  // 024: la IA escribe con formato de WhatsApp (y a veces Markdown). En un
+  // canal que no lo dibuja se le quitan las marcas ANTES de medir, enviar y
+  // guardar: lo que queda en el hilo es lo que el cliente leyó. Lo que escribe
+  // una persona no se toca.
+  const text =
+    input.aiGenerated && capabilitiesFor(canal).textFormat === "plain"
+      ? plainSocialText(input.text)
+      : input.text;
+
+  // 022: el límite de longitud es del canal. WhatsApp y TikTok lo declaran en
+  // caracteres y se comprueba aquí, antes de llamar a nadie; Instagram y
+  // Messenger (en bytes) lo siguen comprobando en su propio camino.
+  if (capabilitiesFor(canal).maxTextChars !== null && !textFits(canal, text)) {
+    throw new SendError("text_too_long", textLimitMessage(canal));
+  }
+
+  const cita = await resolverMensajeCitado(target, input.replyToMessageId);
 
   const waMessageId = target.instagram
-    ? await callInstagramSend(target, input.text)
+    ? await callInstagramSend(target, text)
     : target.messenger
-      ? await callMessengerSend(target, input.text)
-      : await callGraphSend(credentials!, {
-          messaging_product: "whatsapp",
-          ...target.destinatario,
-          type: "text",
-          text: { body: input.text },
-        });
+      ? await callMessengerSend(target, text)
+      : target.tiktok
+        ? await callTiktokSend(target, text)
+        : await callGraphSend(
+          credentials!,
+          conCita(
+            {
+              messaging_product: "whatsapp",
+              ...target.destinatario,
+              type: "text",
+              text: { body: text },
+            },
+            cita?.message.waMessageId
+          )
+        );
 
   const messageId = await persistOutbound({
     organizationId: input.organizationId,
     conversationId: input.conversationId,
     waMessageId,
     type: "text",
-    text: input.text,
+    text,
     // Un canal sin acuses de entrega confirma al aceptar; uno con acuses
     // avanza despues por webhook. Sin esta distincion el mensaje se queda
     // con el reloj puesto para siempre.
@@ -325,6 +523,7 @@ export async function sendText(input: {
       : "sent",
     aiGenerated: input.aiGenerated,
     origin: input.aiGenerated ? "ai" : "operator",
+    cita,
   });
 
   return { messageId };
@@ -341,9 +540,18 @@ export async function sendMediaMessage(input: {
   organizationId: string;
   file: { data: Buffer; mimeType: string; fileName?: string };
   caption?: string;
+  /** 039: id local del mensaje al que se responde citando. */
+  replyToMessageId?: string;
+  /** 044: grabado en el compositor; sale como nota de voz si es Ogg/Opus. */
+  voz?: boolean;
 }): Promise<SendResult> {
+  // 044: un WebM grabado se pasa a Ogg antes de validar (WhatsApp no acepta WebM).
+  const audio = input.file.mimeType.startsWith("audio/")
+    ? prepararAudioSaliente(input.file, input.voz === true)
+    : { file: input.file, voice: false };
+  const file = audio.file;
   // Validación previa (FR-007): tipo y tamaño antes de tocar disco o red.
-  const kind = validateOutgoing(input.file.mimeType, input.file.data.byteLength);
+  const kind = validateOutgoing(file.mimeType, file.data.byteLength);
 
   const target = await prepareSend(input.conversationId, input.organizationId);
   const { credentials } = target;
@@ -354,13 +562,15 @@ export async function sendMediaMessage(input: {
       `Todavía no se pueden enviar adjuntos por ${sendCaps.label}; manda el texto`
     );
   }
+  const cita = await resolverMensajeCitado(target, input.replyToMessageId);
 
   const db = getDb();
   const assetId = newId("mediaAsset");
   const storagePath = await saveMediaFile(
     input.organizationId,
     assetId,
-    input.file.data
+    file.data,
+    file.mimeType
   );
   const assetRows = await db
     .insert(schema.mediaAsset)
@@ -368,9 +578,9 @@ export async function sendMediaMessage(input: {
       id: assetId,
       organizationId: input.organizationId,
       kind,
-      mimeType: input.file.mimeType,
-      fileName: input.file.fileName ?? null,
-      fileSize: input.file.data.byteLength,
+      mimeType: file.mimeType,
+      fileName: file.fileName ?? null,
+      fileSize: file.data.byteLength,
       caption: input.caption ?? null,
       storagePath,
       fetchStatus: "available",
@@ -379,7 +589,7 @@ export async function sendMediaMessage(input: {
   const asset = assetRows[0]!;
 
   try {
-    const waMediaId = await uploadGraphMedia(credentials!, input.file);
+    const waMediaId = await uploadGraphMedia(credentials!, file);
     await db
       .update(schema.mediaAsset)
       .set({ waMediaId, updatedAt: new Date() })
@@ -387,15 +597,22 @@ export async function sendMediaMessage(input: {
 
     const mediaPayload: Record<string, unknown> = { id: waMediaId };
     if (input.caption && kind !== "audio") mediaPayload.caption = input.caption;
-    if (kind === "document" && input.file.fileName) {
-      mediaPayload.filename = input.file.fileName;
+    if (kind === "audio" && audio.voice) mediaPayload.voice = true;
+    if (kind === "document" && file.fileName) {
+      mediaPayload.filename = file.fileName;
     }
-    const waMessageId = await callGraphSend(credentials!, {
-      messaging_product: "whatsapp",
-      ...target.destinatario,
-      type: kind,
-      [kind]: mediaPayload,
-    });
+    const waMessageId = await callGraphSend(
+      credentials!,
+      conCita(
+        {
+          messaging_product: "whatsapp",
+          ...target.destinatario,
+          type: kind,
+          [kind]: mediaPayload,
+        },
+        cita?.message.waMessageId
+      )
+    );
 
     const messageId = await persistOutbound({
       organizationId: input.organizationId,
@@ -407,6 +624,7 @@ export async function sendMediaMessage(input: {
       origin: "operator",
       mediaAssetId: assetId,
       media: asset,
+      cita,
     });
     return { messageId };
   } catch (err) {
@@ -438,6 +656,7 @@ export async function sendMediaMessage(input: {
       origin: "operator",
       mediaAssetId: assetId,
       media: asset,
+      cita,
     });
     throw sendErr;
   }
@@ -457,6 +676,8 @@ export async function sendStructured(
   input: {
     conversationId: string;
     organizationId: string;
+    /** 039: id local del mensaje al que se responde citando. */
+    replyToMessageId?: string;
   } & (
     | { kind: "location"; location: LocationInput }
     | { kind: "contacts"; contacts: ContactInput[] }
@@ -474,6 +695,7 @@ export async function sendStructured(
       "Este canal no admite ubicaciones ni contactos; manda el texto"
     );
   }
+  const cita = await resolverMensajeCitado(target, input.replyToMessageId);
 
   const payload =
     input.kind === "location"
@@ -486,11 +708,17 @@ export async function sendStructured(
           })),
         };
 
-  const waMessageId = await callGraphSend(target.credentials, {
-    messaging_product: "whatsapp",
-    ...target.destinatario,
-    ...payload,
-  });
+  const waMessageId = await callGraphSend(
+    target.credentials,
+    conCita(
+      {
+        messaging_product: "whatsapp",
+        ...target.destinatario,
+        ...payload,
+      },
+      cita?.message.waMessageId
+    )
+  );
 
   const db = getDb();
   const assetRows = await db
@@ -515,6 +743,7 @@ export async function sendStructured(
     origin: "operator",
     mediaAssetId: asset.id,
     media: asset,
+    cita,
   });
   return { messageId };
 }
@@ -571,8 +800,9 @@ async function callInstagramSend(
   }
 
   // Instagram no tiene plantillas: fuera de la ventana de 24 h la única vía
-  // es la etiqueta de agente humano (hasta 7 días).
-  const humanAgentTag = !isWindowOpen(target.conversation.lastInboundAt);
+  // es la etiqueta de agente humano (hasta 7 días). 024: quién puede usarla
+  // lo decidió ya el pre-vuelo.
+  const humanAgentTag = target.humanAgentTag ?? false;
 
   try {
     const res = await sendInstagramText({
@@ -623,8 +853,9 @@ async function callMessengerSend(
   }
 
   // Messenger no tiene plantillas: fuera de la ventana de 24 h la única vía
-  // es la etiqueta de agente humano (hasta 7 días).
-  const humanAgentTag = !isWindowOpen(target.conversation.lastInboundAt);
+  // es la etiqueta de agente humano (hasta 7 días). 024: quién puede usarla
+  // lo decidió ya el pre-vuelo.
+  const humanAgentTag = target.humanAgentTag ?? false;
 
   try {
     const res = await sendMessengerText({
@@ -650,6 +881,43 @@ async function callMessengerSend(
         throw new SendError(
           "meta_unavailable",
           "Messenger no está disponible en este momento; intenta de nuevo"
+        );
+      }
+      throw new SendError("meta_error", err.message);
+    }
+    throw err;
+  }
+}
+
+/**
+ * 022 — Envío por el canal de TikTok. Mismo vocabulario de SendError que los
+ * demás canales. La ventana y el tope ya se comprobaron en `prepareSend`.
+ */
+async function callTiktokSend(target: SendTarget, text: string): Promise<string> {
+  const creds = target.tiktok!;
+
+  try {
+    const res = await sendTiktokText({
+      credentials: creds,
+      // Zernio responde dentro de SU conversación: sin esta referencia el
+      // envío no tiene a dónde ir.
+      threadRef: target.conversation.channelThreadRef,
+      text,
+    });
+    return res.platformMessageId;
+  } catch (err) {
+    if (err instanceof MetaApiError) {
+      if (err.isAuthError) {
+        await markTiktokReconnectRequired(creds.organizationId);
+        throw new SendError(
+          "reconnect_required",
+          "La llave de Zernio expiró o fue revocada: reconecta TikTok"
+        );
+      }
+      if (err.status === 0 || err.status >= 500) {
+        throw new SendError(
+          "meta_unavailable",
+          "TikTok no está disponible en este momento; intenta de nuevo"
         );
       }
       throw new SendError("meta_error", err.message);

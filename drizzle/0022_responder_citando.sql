@@ -1,0 +1,1 @@
+ALTER TABLE "message" ADD COLUMN IF NOT EXISTS "reply_to_wa_message_id" text;

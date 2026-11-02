@@ -4,10 +4,13 @@ import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { Menu } from "lucide-react";
 import type { Branding } from "@/lib/branding";
-import type { ThemePreference } from "@/lib/theme";
+import type { Apariencia } from "@/lib/temas";
 import type { ResolvedCommit } from "@/lib/version";
 import { AppNav } from "@/components/app-nav";
 import { BrandLogo } from "@/components/brand-mark";
+import { cn } from "@/lib/utils";
+import { BandaSinConexion } from "@/components/banda-sin-conexion";
+import { AtajosGlobales } from "@/components/atajos-globales";
 
 /**
  * Cascarón de la app en dos modos:
@@ -25,22 +28,36 @@ export function AppShell({
   branding,
   userName,
   role,
-  theme,
+  apariencia,
   commit,
   agenda = false,
+  kicker,
+  aviso = null,
   children,
 }: {
   branding: Branding;
   userName: string;
   role: string;
-  theme: ThemePreference;
+  apariencia: Apariencia;
   /** Commit resuelto en el servidor, con su procedencia (ver `resolveCommit`). */
   commit?: ResolvedCommit;
   /** 015 — ¿esta instancia tiene agenda? Lo decide el servidor. */
   agenda?: boolean;
+  /** 028 — La etiqueta bajo el logo (`navKicker`). */
+  kicker?: string;
+  /**
+   * Franja de aviso por encima de TODA la aplicación (#85).
+   *
+   * Va aquí y no dentro de una pantalla porque lo que anuncia no es de una
+   * pantalla: es que el agente no puede contestar. Quien tiene ese problema
+   * no está mirando Ajustes, está mirando su bandeja y preguntándose por qué
+   * no responde nadie.
+   */
+  aviso?: React.ReactNode;
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
+  const esBandeja = pathname === "/inbox" || pathname.startsWith("/inbox/");
   const [navOpen, setNavOpen] = useState(false);
 
   // Navegar = cerrar el cajón. Sin esto, tocar "Pipeline" deja el velo encima
@@ -59,7 +76,9 @@ export function AppShell({
   }, [navOpen]);
 
   return (
-    <div className="flex h-dvh overflow-hidden bg-background">
+    // 061 · D1 — El marco: en escritorio la app son tarjetas separadas sobre
+    // un fondo suave; en el teléfono la pantalla entera es la tarjeta.
+    <div className="app-marco app-escala flex overflow-hidden lg:gap-[var(--hueco)] lg:p-[var(--hueco)]">
       {navOpen && (
         <button
           aria-label="Cerrar el menú"
@@ -74,16 +93,15 @@ export function AppShell({
         commit={commit}
         userName={userName}
         role={role}
-        theme={theme}
+        apariencia={apariencia}
         agenda={agenda}
+        kicker={kicker}
         open={navOpen}
         onClose={() => setNavOpen(false)}
       />
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        {/* Misma pieza que la barra lateral (`nav-dark`): en el teléfono la
-            franja azul marino de arriba es lo que queda del bicolor. */}
-        <header className="nav-dark flex h-12 shrink-0 items-center gap-1.5 border-b bg-subtle px-2 text-foreground lg:hidden">
+      <div className="flex min-w-0 flex-1 flex-col bg-background lg:gap-[var(--hueco)] lg:bg-transparent">
+        <header className="flex h-12 shrink-0 items-center gap-1.5 border-b bg-background px-2 text-foreground lg:hidden">
           <button
             onClick={() => setNavOpen(true)}
             aria-label="Abrir el menú"
@@ -95,7 +113,22 @@ export function AppShell({
           <BrandLogo branding={branding} className="min-w-0" />
         </header>
 
-        <main className="min-h-0 min-w-0 flex-1 overflow-hidden">{children}</main>
+        {aviso}
+        {/* 056 — El tiempo real caído se ve desde cualquier pantalla. */}
+        <BandaSinConexion />
+        {/* 055 — Ctrl+K y «?» desde cualquier pantalla. */}
+        <AtajosGlobales agenda={agenda} role={role} />
+
+        {/* La Bandeja trae sus propias tarjetas (lista, hilo, panel); el resto
+            de las pantallas vive en una sola. */}
+        <main
+          className={cn(
+            "min-h-0 min-w-0 flex-1 overflow-hidden bg-background",
+            esBandeja ? "lg:bg-transparent" : "lg:tarjeta"
+          )}
+        >
+          {children}
+        </main>
       </div>
     </div>
   );

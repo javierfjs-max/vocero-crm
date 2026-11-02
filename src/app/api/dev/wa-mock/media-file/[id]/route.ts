@@ -1,4 +1,5 @@
 import { mockGuard } from "@/lib/dev-guard";
+import { empaquetarOgg } from "@/lib/audio/webm-ogg";
 import { pngDePrueba } from "@/server/dev/png-de-prueba";
 
 /**
@@ -60,6 +61,23 @@ export async function GET(
       return new Response(null, { status: 503 });
     }
     return new Response(new Uint8Array(pngDePrueba(id)), {
+      headers: { "content-type": "image/png" },
+    });
+  }
+
+  // 044 — Una nota de voz de verdad (Ogg/Opus, 3 s de silencio) para que el
+  // reproductor la pueda decodificar.
+  if (id.includes("audio")) {
+    const silencio = Array.from({ length: 150 }, () => new Uint8Array([0xf8, 0xff, 0xfe]));
+    return new Response(new Uint8Array(empaquetarOgg(undefined, silencio)), {
+      headers: { "content-type": "audio/ogg; codecs=opus" },
+    });
+  }
+
+  // 045 — Una foto de verdad (grande, como las de un teléfono), para probar
+  // que el hilo se queda abajo cuando termina de cargar.
+  if (id.includes("imagen")) {
+    return new Response(new Uint8Array(pngDePrueba(id, 600)), {
       headers: { "content-type": "image/png" },
     });
   }

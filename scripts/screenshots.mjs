@@ -16,12 +16,28 @@
  * negocio demo, conecta un número de prueba por el mock y deja la marca por
  * defecto; después captura las cinco pantallas de la portada a 1440×900 en
  * tema claro. No toca ninguna API real: todo sale del mock.
+ *
+ * 047 — Para el antes y el después de una spec, capturas sueltas:
+ *
+ *   SCREENSHOTS_ONLY="/settings/whatsapp=ajustes-whatsapp.png"  *   SCREENSHOTS_THEME=dark SCREENSHOTS_OUT=.tmp/antes  *   node --env-file=.env scripts/screenshots.mjs
+ *
+ * Con `SCREENSHOTS_ONLY` (pares `ruta=archivo` separados por coma) captura
+ * solo esas rutas, a página completa, y se salta las cinco de la portada.
+ * `SCREENSHOTS_THEME` (light o dark) fija la preferencia del dispositivo, que
+ * es una cookie: el CRM no sigue al tema del sistema. `SCREENSHOTS_SCROLL=bottom`
+ * baja hasta el final cada contenedor con scroll: Ajustes desplaza dentro de
+ * su propio panel, y la página completa no lo alcanza.
  */
 import { mkdir } from "node:fs/promises";
 import { chromium } from "playwright";
 
 const BASE = process.env.APP_BASE_URL ?? "http://localhost:3000";
-const OUT = "docs/screenshots";
+const OUT = process.env.SCREENSHOTS_OUT ?? "docs/screenshots";
+const THEME = process.env.SCREENSHOTS_THEME === "dark" ? "dark" : "light";
+const ONLY = (process.env.SCREENSHOTS_ONLY ?? "")
+  .split(",")
+  .map((par) => par.trim().split("="))
+  .filter(([ruta, archivo]) => ruta && archivo);
 const VIEWPORT = { width: 1440, height: 900 };
 const EMAIL = process.env.SCREENSHOTS_EMAIL ?? "capturas@vocero.test";
 const PASSWORD = process.env.SCREENSHOTS_PASSWORD ?? "capturas-vocero-123";
@@ -34,7 +50,7 @@ const context = await browser.newContext({
   deviceScaleFactor: 1,
   locale: "es-MX",
   timezoneId: "America/Mexico_City",
-  colorScheme: "light",
+  colorScheme: THEME,
   reducedMotion: "reduce",
 });
 
@@ -84,6 +100,8 @@ await call("/api/settings/branding", {
   data: { name: "Vocero", accent: "#0d5bff", currency: "MXN" },
 });
 
+await context.addCookies([{ name: "vocero-theme", value: THEME, url: BASE }]);
+
 const page = await context.newPage();
 
 /**
@@ -100,6 +118,34 @@ async function shoot(path, file, ready) {
   await page.waitForTimeout(500);
   await page.screenshot({ path: `${OUT}/${file}`, animations: "disabled" });
   console.log("  ✓", file);
+}
+
+if (ONLY.length) {
+  for (const [ruta, archivo] of ONLY) {
+    await page.goto(`${BASE}${ruta}`, { waitUntil: "load" });
+    await page.addStyleTag({ content: "nextjs-portal{display:none!important}" });
+    await page.evaluate(() => document.fonts.ready);
+    // Las pantallas de Ajustes piden sus datos al montar: no se captura el
+    // «Cargando…» (la primera visita a una ruta en dev además la compila).
+    await page
+      .getByText(/^Cargando…?$/)
+      .first()
+      .waitFor({ state: "detached", timeout: 60000 })
+      .catch(() => {});
+    await page.waitForTimeout(1500);
+    if (process.env.SCREENSHOTS_SCROLL === "bottom") {
+      await page.evaluate(() => {
+        for (const el of document.querySelectorAll("*")) {
+          if (el.scrollHeight > el.clientHeight + 4) el.scrollTop = el.scrollHeight;
+        }
+      });
+      await page.waitForTimeout(300);
+    }
+    await page.screenshot({ path: `${OUT}/${archivo}`, fullPage: true, animations: "disabled" });
+    console.log("  ✓", archivo);
+  }
+  await browser.close();
+  process.exit(0);
 }
 
 await shoot("/inbox", "bandeja.png", async () => {

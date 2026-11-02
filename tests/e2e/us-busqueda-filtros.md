@@ -35,7 +35,7 @@ al montar se adopta lo que ya haya en el DOM.
 
 ## Filtro por etapa del embudo
 
-7. Bandeja: selector junto a «Todas / No leídas», con las etapas presentes.
+7. Bandeja: selector dentro del menú «Filtrar» (052), con las etapas presentes.
    ✅ Filtrar deja solo esa etapa; «Toda etapa» restaura.
    ✅ Búsqueda + etapa se combinan (nunca se contradicen).
 8. Contactos: selector con las etapas del pipeline **completo** (orden real,

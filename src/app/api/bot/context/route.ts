@@ -5,7 +5,10 @@ import { requireBotKey, resolveInstanceOrg } from "@/server/bot/auth";
 import { serializeFicha } from "@/server/bot/ficha";
 import { findContactByIdentity } from "@/server/inbox/identity";
 import { isWindowOpen, windowRemainingMs } from "@/server/inbox/window";
+import { windowMsFor } from "@/server/channels/capabilities";
 import { citasParaContexto } from "@/server/agenda/context";
+import { anuncioDelContacto } from "@/server/attribution/store";
+import { siguientesDelLead } from "@/server/bot/stage";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +25,16 @@ export const dynamic = "force-dynamic";
  * conversación. Lo que aquí sale es lo que solo el CRM sabe — quién es la
  * persona, si un humano tomó el control y si la ventana de 24 h sigue abierta
  * (y, con la agenda encendida, qué citas tiene: `booking`).
+ *
+ * 031 — `adOrigen`: de qué anuncio llegó la persona, o `null`. Antes un
+ * cerebro delante del CRM lo leía del `referral` del webhook de Meta; con el
+ * despacho el webhook ya no le llega, y esto es lo que lo reemplaza. Misma
+ * llave y misma forma que en Vocero Cloud. El `ctwa_clid` no sale: solo si
+ * existe.
+ *
+ * 038 — `lead.nextStages`: a qué etapas puede mover el cerebro al lead con
+ * `POST /api/bot/stage` (las abiertas después de la actual, en orden). Va
+ * aquí y no en el perfil porque depende de la etapa de este momento.
  */
 export async function GET(req: Request) {
   const denied = requireBotKey(req);
@@ -89,7 +102,7 @@ export async function GET(req: Request) {
     return apiError(404, "not_found", "Conversación no encontrada");
   }
 
-  const [leadRows, booking] = await Promise.all([
+  const [leadRows, booking, anuncio] = await Promise.all([
     db
       .select({ lead: schema.lead, stage: schema.pipelineStage })
       .from(schema.lead)
@@ -105,7 +118,11 @@ export async function GET(req: Request) {
       )
       .limit(1),
     citasParaContexto(organizationId, contact.id),
+    anuncioDelContacto(organizationId, contact.id),
   ]);
+  const nextStages = leadRows[0]
+    ? await siguientesDelLead(organizationId, leadRows[0].lead.stageId)
+    : [];
 
   return Response.json({
     contact: {
@@ -125,11 +142,30 @@ export async function GET(req: Request) {
       // aunque el flag siga en true.
       aiEnabled: conversation.aiEnabled && !conversation.handoffAt,
       handoffAt: conversation.handoffAt?.toISOString() ?? null,
-      windowOpen: isWindowOpen(conversation.lastInboundAt),
-      windowRemainingMs: windowRemainingMs(conversation.lastInboundAt),
+      // 022: la ventana es la del canal de la conversación.
+      windowOpen: isWindowOpen(
+        conversation.lastInboundAt,
+        new Date(),
+        windowMsFor(conversation.channel)
+      ),
+      windowRemainingMs: windowRemainingMs(
+        conversation.lastInboundAt,
+        new Date(),
+        windowMsFor(conversation.channel)
+      ),
     },
     lead: leadRows[0]
-      ? { id: leadRows[0].lead.id, stageName: leadRows[0].stage.name }
+      ? { id: leadRows[0].lead.id, stageName: leadRows[0].stage.name, nextStages }
+      : null,
+    adOrigen: anuncio
+      ? {
+          headline: anuncio.headline,
+          body: anuncio.body,
+          sourceType: anuncio.sourceType,
+          sourceUrl: anuncio.sourceUrl,
+          hasCtwaClid: anuncio.hasCtwaClid,
+          capturedAt: anuncio.capturedAt,
+        }
       : null,
     /**
      * 015 — Las citas del contacto. FALTA con la agenda apagada (o si no se

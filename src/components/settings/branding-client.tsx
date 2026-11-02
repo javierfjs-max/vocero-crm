@@ -12,7 +12,12 @@ import {
   type AccentSet,
   type Branding,
 } from "@/lib/branding";
-import { CURRENCIES, DEFAULT_CURRENCY, type Currency } from "@/lib/money";
+import {
+  CURRENCY_GROUPS,
+  CURRENCY_OPTIONS,
+  DEFAULT_CURRENCY,
+  type Currency,
+} from "@/lib/money";
 import { cn } from "@/lib/utils";
 import { useResolvedTheme } from "@/components/use-theme";
 import { BrandLogo } from "@/components/brand-mark";
@@ -36,7 +41,10 @@ function accentVars(s: AccentSet): React.CSSProperties {
 
 export function BrandingClient({
   favicon = null,
+  kicker = "CRM · WhatsApp",
 }: {
+  /** 028 — La etiqueta bajo el logo, la misma que enseña el menú. */
+  kicker?: string;
   /**
    * Logo subido, solo para la vista previa: se sube y se quita en su propia
    * tarjeta. Llega del servidor y no del fetch de abajo a propósito: esa
@@ -132,10 +140,14 @@ export function BrandingClient({
               onChange={(e) => setCurrency(e.target.value as Currency)}
               className="h-9 max-w-xs rounded-md border border-input bg-card px-2 text-sm"
             >
-              {CURRENCIES.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
+              {CURRENCY_GROUPS.map((g) => (
+                <optgroup key={g.id} label={g.label}>
+                  {CURRENCY_OPTIONS.filter((c) => c.group === g.id).map((c) => (
+                    <option key={c.code} value={c.code}>
+                      {c.code} · {c.name} ({c.where})
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
             <p className="text-xs text-text-3">
@@ -204,7 +216,7 @@ export function BrandingClient({
                 <BrandLogo
                   branding={{ name: name.trim() || DEFAULT_BRANDING.name, accent, favicon }}
                 />
-                <span className="kicker mt-2 block">CRM · WhatsApp</span>
+                <span className="kicker mt-2 block">{kicker}</span>
               </div>
               <span className={cn(navItemClass(true), "mt-3")}>
                 <Inbox className="h-[17px] w-[17px] text-brand" strokeWidth={1.8} />

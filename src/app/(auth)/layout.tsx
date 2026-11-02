@@ -1,6 +1,8 @@
 import { isVoceroName } from "@/lib/brand";
 import { DEFAULT_BRANDING } from "@/lib/branding";
 import { getBranding } from "@/server/branding";
+import { enabledChannels } from "@/server/channels/enabled";
+import { productName } from "@/lib/channels";
 import { BrandLogo } from "@/components/brand-mark";
 
 /**
@@ -39,7 +41,9 @@ export default async function AuthLayout({
           ) : (
             <div>
               <h1 className="sr-only">{branding.name}</h1>
-              <p className="text-sm text-text-3">CRM de WhatsApp con agente de IA</p>
+              <p className="text-sm text-text-3">
+                {productName([...enabledChannels()])} con agente de IA
+              </p>
             </div>
           )}
         </div>

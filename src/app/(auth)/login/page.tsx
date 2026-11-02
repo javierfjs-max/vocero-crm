@@ -30,7 +30,9 @@ export default function LoginPage() {
       );
       return;
     }
-    router.push("/inbox");
+    // A la raíz, no a la Bandeja: ahí se decide si toca la guía de inicio
+    // (#86) o la Bandeja de siempre.
+    router.push("/");
     router.refresh();
   }
 

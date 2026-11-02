@@ -19,6 +19,10 @@ Connection: keep-alive
   - `message.status` — `{ conversationId, messageId, status }`
   - `conversation.updated` — `{ conversation: {...} }` (handoff, unread, last_message_at)
   - `lab.run` — `{ runId, status, progress: {done, total}, score? }`
+  - **050** `note.new` — `{ conversationId, note: NotaDto }`: una nota interna nueva
+    (la escribe el equipo; el cliente nunca la ve). El campo `note.puedeBorrar` viene
+    calculado para el autor: quien la recibe relee `GET /api/conversations/{id}/notes`.
+  - **050** `note.deleted` — `{ conversationId, noteId }`.
 - **Catch-up**: el cliente manda `Last-Event-ID` (o el front refetch desde su último
   `last_message_at`) al reconectar; el servidor NO garantiza replay — el cliente hace
   refetch de conversaciones/mensajes con `since=<timestamp>` al evento `open` tras una

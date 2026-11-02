@@ -4,11 +4,7 @@ import {
   getInstagramCredentialsByAccountRef,
   getInstagramCredentialsByIgUserId,
 } from "@/server/instagram/credentials";
-import {
-  parseZernioEvent,
-  zernioSentAtSeconds,
-  type ZernioEvent,
-} from "@/server/zernio";
+import { zernioSentAtSeconds, type ZernioEvent } from "@/server/zernio";
 
 /**
  * 014 — Adaptadores de entrada del canal de Instagram.
@@ -25,22 +21,6 @@ import {
  * quien ya la importaba de aquí.
  */
 export { isValidZernioSignature } from "@/server/zernio";
-
-/**
- * Evento de Zernio. Devuelve el secreto esperado para poder validar la firma
- * ANTES de procesar: el enrutado por `account.id` necesita leer el cuerpo, así
- * que la validación ocurre en dos tiempos (resolver cuenta, luego firmar).
- */
-export async function resolveZernioSecret(
-  rawBody: string
-): Promise<{ secret: string | null; accountRef: string | null }> {
-  const parsed: ZernioEvent | null = parseZernioEvent(rawBody);
-  if (!parsed) return { secret: null, accountRef: null };
-  const accountRef = parsed.account?.id ?? null;
-  if (!accountRef) return { secret: null, accountRef: null };
-  const creds = await getInstagramCredentialsByAccountRef(accountRef);
-  return { secret: creds?.webhookSecret ?? null, accountRef };
-}
 
 export async function processZernioEvent(payload: unknown): Promise<void> {
   const evt = payload as ZernioEvent;

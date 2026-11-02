@@ -30,7 +30,7 @@ export function parseAgendaFlag(raw: string | undefined): boolean {
 
 /**
  * Se lee de `process.env` directo, no por `getEnv()`, igual que
- * `isMockEnabled()` e `isAiConfigured()`: preguntar si una feature existe no
+ * `isMockEnabled()` e `isAiConfiguredByEnv()`: preguntar si una feature existe no
  * puede depender de que TODO el entorno valide. Con `getEnv()`, un turno del
  * agente reventaba —en vez de degradar— solo por consultar la bandera.
  *

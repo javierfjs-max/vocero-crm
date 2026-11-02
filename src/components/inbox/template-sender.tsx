@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { templateLanguageName } from "@/lib/template-languages";
 import type { TemplateDto } from "@/lib/types";
 import { countVariables } from "@/lib/templates";
 import { Button } from "@/components/ui/button";
@@ -110,7 +111,7 @@ export function TemplateSender({
           <option value="">Elige una plantilla…</option>
           {templates.map((t) => (
             <option key={t.id} value={t.id}>
-              {t.name} ({t.language})
+              {t.name} ({templateLanguageName(t.language)})
             </option>
           ))}
         </select>

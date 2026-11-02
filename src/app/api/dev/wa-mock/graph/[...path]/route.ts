@@ -1,4 +1,5 @@
 import { mockGuard } from "@/lib/dev-guard";
+import { getEnv } from "@/lib/env";
 import {
   getWaMockState,
   nextN,
@@ -59,6 +60,101 @@ function invalidTokenResponse(): Response {
   );
 }
 
+/**
+ * Tokens con los que el mock imita dos rechazos reales de Meta al registrar
+ * el webhook: sin `whatsapp_business_management` (código 200) y una app sin
+ * callback URL propia (el GET de `webhook_configuration` no trae
+ * `application`).
+ */
+const SIN_GESTION = "-sin-gestion";
+const SIN_WEBHOOK_DE_APP = "-sin-app";
+
+function permissionErrorResponse(): Response {
+  return Response.json(
+    {
+      error: {
+        message: "(#200) Permissions error",
+        type: "OAuthException",
+        code: 200,
+        fbtrace_id: "mock",
+      },
+    },
+    { status: 403 }
+  );
+}
+
+function callbackVerificationFailed(failure: string): Response {
+  return Response.json(
+    {
+      error: {
+        message: `(#2200) Callback verification failed with the following errors: ${failure}`,
+        type: "OAuthException",
+        code: 2200,
+        fbtrace_id: "mock",
+      },
+    },
+    { status: 400 }
+  );
+}
+
+/**
+ * Meta verifica el callback ANTES de aceptar un override: le hace el mismo
+ * GET de suscripción que al configurarlo en el panel, y si no devuelve el
+ * challenge, rechaza con 2200. El mock lo hace de verdad contra la URL, así
+ * un verify token que no casa con la ruta no pasa en verde.
+ *
+ * Si la URL es la de esta misma instancia (`APP_BASE_URL`), se le habla por
+ * loopback, como hace `deliverToWebhook`: el dominio público puede no
+ * resolver desde dentro del proceso y lo que se prueba es la ruta y el token.
+ */
+async function callbackVerificationError(
+  uri: string,
+  verifyToken: string
+): Promise<string | null> {
+  const challenge = String(nextN() * 7919);
+  let url: URL;
+  try {
+    url = new URL(uri);
+  } catch {
+    return "Invalid URL";
+  }
+  const own = getEnv().APP_BASE_URL.replace(/\/$/, "");
+  if (url.origin === own) {
+    url = new URL(`http://127.0.0.1:${process.env.PORT ?? "3000"}${url.pathname}${url.search}`);
+  }
+  url.searchParams.set("hub.mode", "subscribe");
+  url.searchParams.set("hub.challenge", challenge);
+  url.searchParams.set("hub.verify_token", verifyToken);
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    const text = await res.text();
+    if (res.status === 200 && text === challenge) return null;
+    return `HTTP Status Code = ${res.status}; the challenge did not match`;
+  } catch {
+    return "Couldn't connect to server";
+  }
+}
+
+/**
+ * 065 — Lo que Meta responde al pedir plantillas a una cuenta de WhatsApp ya
+ * partida por el split de 2026: solo las acepta la Cuenta de mensajes.
+ */
+function cuentaSinPlantillasResponse(): Response {
+  return Response.json(
+    {
+      error: {
+        message: "Invalid parameter",
+        type: "OAuthException",
+        code: 100,
+        error_subcode: 2388339,
+        error_user_title: "This API is not supported for this WhatsApp Business Account",
+        fbtrace_id: "mock",
+      },
+    },
+    { status: 400 }
+  );
+}
+
 /** Un teléfono de Meta es solo dígitos; un BSUID lleva prefijo y punto. */
 function esSoloDigitos(valor: string): boolean {
   return /^[0-9]+$/.test(valor);
@@ -76,11 +172,65 @@ export async function GET(req: Request, ctx: Params) {
   const token = bearerToken(req);
   if (token.endsWith("-invalid")) return invalidTokenResponse();
 
-  // GET {wabaId}/message_templates → lista para el sync
+  // 066 — GET oauth/access_token?client_id&client_secret&code → el canje del
+  // Embedded Signup. Como Meta: el secreto tiene que ser el de la app y cada
+  // `code` sirve una sola vez. El token sale del código, para que el arnés
+  // pueda pedir uno «-sin-gestion».
+  if (path.length === 2 && path[0] === "oauth" && path[1] === "access_token") {
+    const params = new URL(req.url).searchParams;
+    const code = params.get("code") ?? "";
+    const state = getWaMockState();
+    const secret = getEnv().META_APP_SECRET ?? "";
+    if (
+      !code ||
+      code.startsWith("es-invalido") ||
+      state.usedCodes.includes(code) ||
+      !params.get("client_id") ||
+      params.get("client_secret") !== secret
+    ) {
+      return Response.json(
+        {
+          error: {
+            message: "Invalid verification code format.",
+            type: "OAuthException",
+            code: 100,
+            fbtrace_id: "mock",
+          },
+        },
+        { status: 400 }
+      );
+    }
+    state.usedCodes.push(code);
+    return Response.json({
+      access_token: `EAAG-embedded-${code}`,
+      token_type: "bearer",
+    });
+  }
+
+  // 066 — GET {wabaId}/phone_numbers → los números sembrados de esa WABA.
+  if (path.length === 2 && path[1] === "phone_numbers") {
+    return Response.json({ data: getWaMockState().wabaNumbers[path[0]!] ?? [] });
+  }
+
+  // GET {wabaId}/message_templates → lista para el sync. 065: paginada por
+  // cursor como Meta (`limit` + `after`, `paging.next` solo si hay más), y
+  // una cuenta de WhatsApp ya partida la rechaza con 2388339.
   if (path.length === 2 && path[1] === "message_templates") {
     const state = getWaMockState();
+    if (state.splitAccounts[path[0]!]) return cuentaSinPlantillasResponse();
+    const params = new URL(req.url).searchParams;
+    // Sin `limit`, todo de una vez: los guiones que leen el «panel» directo
+    // no paginan. El CRM siempre manda `limit`.
+    const limit = params.has("limit")
+      ? Math.min(Math.max(Number(params.get("limit")) || 25, 1), 100)
+      : state.templates.length || 1;
+    const after = params.get("after");
+    const start = after ? Number(Buffer.from(after, "base64").toString()) || 0 : 0;
+    const page = state.templates.slice(start, start + limit);
+    const end = start + page.length;
+    const cursor = (i: number) => Buffer.from(String(i)).toString("base64");
     return Response.json({
-      data: state.templates.map((t) => ({
+      data: page.map((t) => ({
         id: t.id,
         name: t.name,
         language: t.language,
@@ -88,6 +238,12 @@ export async function GET(req: Request, ctx: Params) {
         status: t.status,
         components: t.components ?? [{ type: "BODY", text: t.body }],
       })),
+      paging: {
+        cursors: { before: cursor(start), after: cursor(end) },
+        ...(end < state.templates.length
+          ? { next: `${new URL(req.url).origin}${new URL(req.url).pathname}?after=${cursor(end)}` }
+          : {}),
+      },
     });
   }
 
@@ -114,7 +270,13 @@ export async function GET(req: Request, ctx: Params) {
     const origin = new URL(req.url).origin;
     return Response.json({
       id: path[0],
-      mime_type: path[0]!.includes("pdf") ? "application/pdf" : "image/jpeg",
+      mime_type: path[0]!.includes("pdf")
+        ? "application/pdf"
+        : path[0]!.includes("audio")
+          ? "audio/ogg; codecs=opus"
+          : path[0]!.includes("imagen")
+            ? "image/png"
+            : "image/jpeg",
       file_size: 13,
       url: `${origin}/api/dev/wa-mock/media-file/${path[0]}`,
     });
@@ -123,6 +285,44 @@ export async function GET(req: Request, ctx: Params) {
   // 017 — GET {psid}?fields=first_name,last_name → perfil de quien escribe
   // por Messenger (la ingesta lo consulta la primera vez que ve un PSID).
   const fields = new URL(req.url).searchParams.get("fields") ?? "";
+
+  // GET {phoneNumberId}?fields=webhook_configuration → el override vigente
+  // del número y la callback URL de la app (ausente con un token "-sin-app").
+  if (path.length === 1 && fields.includes("webhook_configuration")) {
+    const override = getWaMockState().phoneWebhooks[path[0]!];
+    return Response.json({
+      webhook_configuration: {
+        ...(override ? { phone_number: override } : {}),
+        ...(token.endsWith(SIN_WEBHOOK_DE_APP)
+          ? {}
+          : { application: "https://app-de-meta.mock/webhook" }),
+      },
+      id: path[0],
+    });
+  }
+
+  // 065 — GET {wabaId}?fields=paid_messaging_account_id → la Cuenta de
+  // mensajes de una cuenta partida. Campo no documentado: si la cuenta no la
+  // revela, Meta responde 100 «nonexisting field», y el CRM sigue sin ella.
+  if (path.length === 1 && fields.includes("paid_messaging_account_id")) {
+    const split = getWaMockState().splitAccounts[path[0]!];
+    if (!split?.descubrible) {
+      return Response.json(
+        {
+          error: {
+            message:
+              "(#100) Tried accessing nonexisting field (paid_messaging_account_id)",
+            type: "OAuthException",
+            code: 100,
+            fbtrace_id: "mock",
+          },
+        },
+        { status: 400 }
+      );
+    }
+    return Response.json({ id: path[0], paid_messaging_account_id: split.messagingAccountId });
+  }
+
   if (path.length === 1 && fields.includes("first_name")) {
     return Response.json({
       id: path[0],
@@ -166,8 +366,32 @@ export async function POST(req: Request, ctx: Params) {
         { status: 400 }
       );
     }
+    // 044 — Meta no acepta WebM: así una grabación sin convertir no pasa en
+    // verde aquí y falla en producción.
+    const type = String(form?.get("type") ?? file.type ?? "");
+    if (/^(audio|video)\/webm/i.test(type)) {
+      return Response.json(
+        {
+          error: {
+            message: `(#131053) Media upload error: Unsupported media type ${type}`,
+            type: "OAuthException",
+            code: 131053,
+          },
+        },
+        { status: 400 }
+      );
+    }
     // El id arranca con "media" para que el GET de metadata lo resuelva.
-    return Response.json({ id: `media-up-${nextN()}` });
+    const id = `media-up-${nextN()}`;
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    getWaMockState().uploads.push({
+      id,
+      type,
+      fileName: file instanceof File ? file.name : "",
+      size: bytes.byteLength,
+      head: Buffer.from(bytes.subarray(0, 4)).toString("hex"),
+    });
+    return Response.json({ id });
   }
 
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
@@ -326,6 +550,7 @@ export async function POST(req: Request, ctx: Params) {
   // POST {wabaId}/message_templates → alta de plantilla (queda PENDING)
   if (path.length === 2 && path[1] === "message_templates") {
     const state = getWaMockState();
+    if (state.splitAccounts[path[0]!]) return cuentaSinPlantillasResponse();
     const components = (body.components ?? []) as {
       type?: string;
       text?: string;
@@ -366,11 +591,41 @@ export async function POST(req: Request, ctx: Params) {
     return Response.json({ id: tpl.id, status: "PENDING", category: tpl.category });
   }
 
+  // 066 — POST {phoneNumberId}/register → registra el número en la Cloud API
+  // con su PIN. "000000" imita un número que ya tenía otro PIN.
+  if (path.length === 2 && path[1] === "register") {
+    const pin = String(body.pin ?? "");
+    if (body.messaging_product !== "whatsapp" || !/^\d{6}$/.test(pin) || pin === "000000") {
+      return Response.json(
+        {
+          error: {
+            message: "(#133005) Two step verification PIN Mismatch",
+            type: "OAuthException",
+            code: 133005,
+            fbtrace_id: "mock",
+          },
+        },
+        { status: 400 }
+      );
+    }
+    const state = getWaMockState();
+    state.registrations[path[0]!] = pin;
+    for (const numeros of Object.values(state.wabaNumbers)) {
+      for (const n of numeros) if (n.id === path[0]) n.status = "CONNECTED";
+    }
+    return Response.json({ success: true });
+  }
+
   // POST {wabaId}/subscribed_apps → suscribe la app. Como en Meta, el override
   // de callback se fija mandándolo en el cuerpo y un POST SIN él lo BORRA
   // ("Delete WABA alternate callback"): un CRM que re-suscribe a ciegas
   // desconecta aquí al cerebro externo igual que en producción.
   if (path.length === 2 && path[1] === "subscribed_apps") {
+    if (token.endsWith(SIN_GESTION)) return permissionErrorResponse();
+    // 066 — La cuenta de WhatsApp partida que ya rechaza la suscripción.
+    if (getWaMockState().splitAccounts[path[0]!]?.rechazaSuscripcion) {
+      return cuentaSinPlantillasResponse();
+    }
     const uri =
       typeof body.override_callback_uri === "string"
         ? body.override_callback_uri.trim()
@@ -378,6 +633,28 @@ export async function POST(req: Request, ctx: Params) {
     getWaMockState().wabaSubscriptions[path[0]!] = {
       overrideCallbackUri: uri || null,
     };
+    return Response.json({ success: true });
+  }
+
+  // POST {phoneNumberId} con webhook_configuration → override del NÚMERO, el
+  // que el CRM registra al guardar la conexión. Como en Meta: exige el
+  // permiso de gestión, verifica el callback (handshake) antes de aceptarlo y
+  // una cadena vacía lo quita.
+  if (path.length === 1 && body.webhook_configuration) {
+    if (token.endsWith(SIN_GESTION)) return permissionErrorResponse();
+    const config = body.webhook_configuration as {
+      override_callback_uri?: string;
+      verify_token?: string;
+    };
+    const state = getWaMockState();
+    const uri = config.override_callback_uri ?? "";
+    if (!uri) {
+      delete state.phoneWebhooks[path[0]!];
+      return Response.json({ success: true });
+    }
+    const failure = await callbackVerificationError(uri, config.verify_token ?? "");
+    if (failure) return callbackVerificationFailed(failure);
+    state.phoneWebhooks[path[0]!] = uri;
     return Response.json({ success: true });
   }
 

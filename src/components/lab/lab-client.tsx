@@ -1,8 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import {
   AlertTriangle,
+  ArrowUpRight,
+  Cable,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
@@ -16,10 +19,12 @@ import {
 import { useEvents } from "@/components/use-events";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { GUIA_DEL_PAR_URL } from "@/lib/guia-del-par";
 
 type Run = {
   id: string;
@@ -44,7 +49,7 @@ type Case = {
   status: string;
   veredicto: "verde" | "amarillo" | "rojo" | null;
   hallazgos: Hallazgo[];
-  transcript: { role: "cliente" | "agente"; text: string }[];
+  transcript: { role: "cliente" | "agente" | "sistema"; text: string }[];
 };
 
 const TIPO_LABELS: Record<Hallazgo["tipo"], string> = {
@@ -57,6 +62,8 @@ const TIPO_LABELS: Record<Hallazgo["tipo"], string> = {
 export function LabClient() {
   const [runs, setRuns] = useState<Run[]>([]);
   const [aiConfigured, setAiConfigured] = useState(true);
+  // 036 — El Laboratorio prueba al agente conectado; sin él no hay a quién.
+  const [brainConnected, setBrainConnected] = useState(true);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [detail, setDetail] = useState<{ run: Run; cases: Case[] } | null>(null);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
@@ -66,9 +73,14 @@ export function LabClient() {
   const refetchRuns = useCallback(async () => {
     const res = await fetch("/api/lab/runs").catch(() => null);
     if (!res?.ok) return;
-    const data = (await res.json()) as { runs: Run[]; aiConfigured: boolean };
+    const data = (await res.json()) as {
+      runs: Run[];
+      aiConfigured: boolean;
+      brainConnected?: boolean;
+    };
     setRuns(data.runs);
     setAiConfigured(data.aiConfigured);
+    setBrainConnected(data.brainConnected !== false);
     if (!selectedRunId && data.runs[0]) setSelectedRunId(data.runs[0].id);
   }, [selectedRunId]);
 
@@ -105,8 +117,14 @@ export function LabClient() {
     if (!res) return;
     if (!res.ok) {
       const data = (await res.json().catch(() => null)) as {
-        error?: { message?: string };
+        error?: { code?: string; message?: string };
       } | null;
+      // 036 — El agente se desconectó desde que se abrió la pantalla: se
+      // muestra el aviso completo en vez de un error suelto.
+      if (data?.error?.code === "sin_cerebro") {
+        setBrainConnected(false);
+        return;
+      }
       setError(data?.error?.message ?? "No se pudo lanzar la corrida");
       return;
     }
@@ -116,19 +134,27 @@ export function LabClient() {
     void refetchRuns();
   }
 
-  if (!aiConfigured) {
+  // 036 — Sin agente conectado, las corridas viejas se siguen pudiendo leer:
+  // el aviso va arriba y solo se apaga el botón de correr.
+  if (!aiConfigured && brainConnected) {
     return (
       <div className="flex h-full flex-col">
         <Header running={false} launching={false} onLaunch={() => {}} disabled />
-        <div className="m-6 rounded-lg border border-brand-soft bg-brand-tint p-8 text-center">
+        <div className="m-4 rounded-lg border border-brand-soft bg-brand-tint p-6 text-center sm:m-6 sm:p-8">
           <Sparkles className="mx-auto mb-2 h-8 w-8 text-primary" />
           <p className="font-medium">
             Configura tu proveedor de IA para usar el Laboratorio
           </p>
           <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
-            El Laboratorio necesita el agente activo: agrega{" "}
-            <code className="rounded bg-secondary px-1">OPENROUTER_API_TOKEN</code> a la
-            instancia y vuelve aquí.
+            Con esa llave piensan tu agente (a través del CRM) y el juez que
+            califica cada conversación: configúrala en{" "}
+            <Link
+              href="/settings/ai"
+              className="font-medium text-brand-text underline underline-offset-2"
+            >
+              Ajustes → IA
+            </Link>{" "}
+            y vuelve aquí.
           </p>
         </div>
       </div>
@@ -143,9 +169,37 @@ export function LabClient() {
         running={running}
         launching={launching}
         onLaunch={() => void launch()}
-        disabled={false}
+        disabled={!brainConnected}
       />
       {error && <p className="px-4 pt-3 text-sm text-destructive sm:px-6">{error}</p>}
+
+      {!brainConnected && (
+        <div
+          role="status"
+          data-lab-sin-cerebro
+          className="mx-4 mt-4 flex items-start gap-3 rounded-lg border bg-subtle p-4 sm:mx-6 sm:mt-6"
+        >
+          <Cable aria-hidden className="mt-0.5 h-5 w-5 shrink-0 text-text-3" strokeWidth={1.7} />
+          <div className="min-w-0 text-sm">
+            <p className="font-semibold">Sin agente conectado</p>
+            <p className="mt-0.5 leading-relaxed text-text-2">
+              El Laboratorio prueba al agente que contesta a tus clientes:
+              clientes simulados conversan con él y un juez califica cada
+              conversación. Vocero no trae agente propio, y esta instancia aún
+              no tiene uno conectado.{" "}
+              <a
+                href={GUIA_DEL_PAR_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-0.5 whitespace-nowrap font-medium text-brand-text underline underline-offset-2 hover:text-brand"
+              >
+                Cómo conectarlo
+                <ArrowUpRight aria-hidden className="h-3.5 w-3.5" strokeWidth={1.8} />
+              </a>
+            </p>
+          </div>
+        </div>
+      )}
 
       {running && progress && (
         <div className="mx-6 mt-4 rounded-lg border bg-card p-4">
@@ -173,11 +227,18 @@ export function LabClient() {
         {detail ? (
           <Report detail={detail} onApplied={() => void refetchDetail(detail.run.id)} />
         ) : (
-          <div className="rounded-lg border border-dashed p-10 text-center text-sm text-muted-foreground">
-            {runs.length === 0
-              ? "Corre tu primera evaluación: 6 clientes simulados conversarán con tu agente y un juez calificará cada conversación."
-              : "Elige una corrida del historial."}
-          </div>
+          <EmptyState
+            icon={FlaskConical}
+            className="rounded-lg border border-dashed p-10"
+            title={runs.length === 0 ? "Sin corridas todavía" : "Elige una corrida"}
+            description={
+              runs.length === 0
+                ? brainConnected
+                  ? "Corre tu primera evaluación: 6 clientes simulados conversarán con tu agente y un juez calificará cada conversación."
+                  : "Cuando conectes tu agente, aquí aparecerán sus evaluaciones."
+                : "Abre una corrida del historial para ver su reporte."
+            }
+          />
         )}
       </div>
     </div>
@@ -300,6 +361,11 @@ function Report({
               intentarlo.
             </p>
           )}
+          {run.status === "done" && run.error && (
+            <p className="text-sm text-warning-text">
+              Sin respuesta del agente: {run.error}
+            </p>
+          )}
         </CardHeader>
         {run.status === "done" && (
           <CardContent>
@@ -317,6 +383,12 @@ function Report({
               <p className="mt-3 text-xs text-warning-text">
                 {cases.filter((c) => c.status === "judge_failed").length} caso(s) sin
                 veredicto (el juez no respondió válido); excluidos del score.
+              </p>
+            )}
+            {cases.some((c) => c.status === "agent_failed") && (
+              <p className="mt-3 text-xs text-warning-text">
+                {cases.filter((c) => c.status === "agent_failed").length} caso(s) sin
+                respuesta del agente; excluidos del score.
               </p>
             )}
           </CardContent>
@@ -357,6 +429,9 @@ function CaseCard({ testCase, onApplied }: { testCase: Case; onApplied: () => vo
             {c.status === "judge_failed" && (
               <Badge variant="secondary">sin veredicto</Badge>
             )}
+            {c.status === "agent_failed" && (
+              <Badge variant="secondary">el agente no contestó</Badge>
+            )}
           </span>
           <span className="flex items-center gap-2 text-xs text-muted-foreground">
             {c.hallazgos.length > 0 && `${c.hallazgos.length} hallazgo(s)`}
@@ -378,10 +453,19 @@ function CaseCard({ testCase, onApplied }: { testCase: Case; onApplied: () => vo
                 <p key={i}>
                   <span
                     className={
-                      t.role === "cliente" ? "text-info" : "text-primary"
+                      t.role === "cliente"
+                        ? "text-info"
+                        : t.role === "sistema"
+                          ? "text-muted-foreground"
+                          : "text-primary"
                     }
                   >
-                    {t.role === "cliente" ? "Cliente" : "Agente"}:
+                    {t.role === "cliente"
+                      ? "Cliente"
+                      : t.role === "sistema"
+                        ? "Sistema"
+                        : "Agente"}
+                    :
                   </span>{" "}
                   {t.text}
                 </p>

@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { getEnv } from "@/lib/env";
-import { nextN, nextWamid } from "@/server/dev/wa-mock-state";
+import { nextN } from "@/server/dev/wa-mock-state";
 
 /**
  * Construye un payload real de Meta y lo entrega al webhook público por
@@ -34,6 +34,18 @@ type MockMediaInput = {
   caption?: string;
   filename?: string;
   location?: Record<string, unknown>;
+  /** 031 — Las tarjetas de un mensaje `contacts`, con la forma de Meta. */
+  contacts?: Record<string, unknown>[];
+};
+
+/**
+ * #78 — Respuestas de botón con la forma de Meta. `button` es la respuesta a
+ * un botón de plantilla; `interactive` se pasa entero (como el `referral`)
+ * para poder probar `button_reply`, `list_reply` y las formas rotas.
+ */
+type MockButtonInput = {
+  button?: { text: string; payload?: string };
+  interactive?: Record<string, unknown>;
 };
 
 const MOCK_BINARY_TYPES = new Set(["image", "video", "audio", "document", "sticker"]);
@@ -41,16 +53,31 @@ const MOCK_BINARY_TYPES = new Set(["image", "video", "audio", "document", "stick
 function applyMockContent(
   message: Record<string, unknown>,
   type: string,
-  input: { text?: string } & MockMediaInput
+  input: { text?: string } & MockMediaInput & MockButtonInput
 ): void {
   if (type === "text") {
     message.text = { body: input.text ?? "hola" };
+  } else if (type === "button") {
+    // Como lo manda Meta: `context` apunta a la plantilla que traía el botón.
+    const text = input.button?.text ?? input.text ?? "Sí";
+    message.context = { from: "5215500000000", id: `wamid.mock.tpl.${nextN()}` };
+    message.button = { payload: input.button?.payload ?? text, text };
+  } else if (type === "interactive") {
+    message.context = { from: "5215500000000", id: `wamid.mock.int.${nextN()}` };
+    message.interactive = input.interactive ?? {
+      type: "button_reply",
+      button_reply: { id: "btn_mock", title: input.text ?? "Sí" },
+    };
   } else if (type === "location") {
     message.location = input.location ?? {
       latitude: 21.019,
       longitude: -101.257,
       name: "Oficina",
     };
+  } else if (type === "contacts") {
+    message.contacts = input.contacts ?? [
+      { name: { formatted_name: "Luis Gómez", first_name: "Luis" } },
+    ];
   } else if (MOCK_BINARY_TYPES.has(type)) {
     const media: Record<string, unknown> = {
       id: input.mediaId ?? `mockmedia_${nextN()}`,
@@ -90,17 +117,21 @@ export function buildInboundPayload(input: {
   text?: string;
   waMessageId?: string;
   timestamp?: number;
+  /** 039 — `wamid` del mensaje que el cliente cita (va en `context.id`). */
+  replyTo?: string;
 } & MockMediaInput &
-  MockReferralInput) {
+  MockReferralInput &
+  MockButtonInput) {
   const type = input.type ?? "text";
   const message: Record<string, unknown> = {
-    id: input.waMessageId ?? nextWamid("in"),
+    id: input.waMessageId ?? `wamid.mock.in.${nextN()}`,
     timestamp: String(input.timestamp ?? Math.floor(Date.now() / 1000)),
     type,
   };
   if (input.from) message.from = input.from;
   if (input.fromUserId) message.from_user_id = input.fromUserId;
   applyMockContent(message, type, input);
+  if (input.replyTo) message.context = { from: input.from, id: input.replyTo };
 
   // 016 — El referral solo viaja cuando la conversación nació de un anuncio, y
   // normalmente solo en el primer mensaje. Se arma igual que el real para que
@@ -178,7 +209,7 @@ export function buildEchoPayload(input: {
 } & MockMediaInput) {
   const type = input.type ?? "text";
   const message: Record<string, unknown> = {
-    id: input.waMessageId ?? nextWamid("echo"),
+    id: input.waMessageId ?? `wamid.mock.echo.${nextN()}`,
     timestamp: String(input.timestamp ?? Math.floor(Date.now() / 1000)),
     type,
     from: input.from ?? "5215500000000",

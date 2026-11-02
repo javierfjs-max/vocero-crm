@@ -1,21 +1,28 @@
 "use client";
 
-import { AlertTriangle, Cable, Info, Sparkles, type LucideIcon } from "lucide-react";
+import { AlertTriangle, ArrowUpRight, Cable, Info, Power, Send, type LucideIcon } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
+  despachoFallando,
   externalBrainName,
+  externalDown,
   haceCuanto,
+  type BrainDispatchDto,
   type BrainHealthDto,
   type BrainRelayDto,
   type BrainStatusDto,
 } from "@/lib/brain-status";
+import { GUIA_DEL_PAR_URL } from "@/lib/guia-del-par";
 import { cn } from "@/lib/utils";
 
 /**
- * «Quién responde a tus clientes»: arriba de la pantalla del Agente, porque
- * el interruptor de esta página solo gobierna al agente incluido. Un cerebro
- * externo (Nea) contesta por su cuenta, y con los dos activos el cliente
- * recibe dos respuestas distintas.
+ * «Quién responde a tus clientes»: arriba de la pantalla del Agente.
+ *
+ * 036 — Vocero no trae agente: contesta el cerebro que se conecta al lado
+ * (Nea u otro) y solo si el interruptor de esta página está encendido (el CRM
+ * le despacha). Sin cerebro, Vocero es una bandeja manual: el aviso
+ * `sin_cerebro` informa, no alarma. Con cerebro y el interruptor apagado,
+ * `apagado` sí avisa: nadie contesta en automático.
  */
 
 type Tone = "ok" | "warn" | "off";
@@ -34,7 +41,6 @@ export function BrainStatusCard({
   status: BrainStatusDto;
   now?: number;
 }) {
-  const name = externalBrainName(status);
   const lastSeenAt = status.external.lastSeenAt;
 
   return (
@@ -42,47 +48,67 @@ export function BrainStatusCard({
       <CardHeader className="pb-4">
         <CardTitle>Quién responde a tus clientes</CardTitle>
         <CardDescription>
-          Lo que contesta los WhatsApp de esta instancia. Tiene que ser uno solo:
-          si contestan dos, tu cliente recibe dos respuestas.
+          Vocero no trae agente: contesta el que conectas al lado (Nea, o el
+          tuyo), y solo con el interruptor de arriba encendido. Sin agente,
+          contestas tú desde la bandeja.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        {status.warning === "doble_respuesta" && (
-          <Callout tone="danger" icon={AlertTriangle} title="Tus clientes pueden recibir dos respuestas">
-            El agente incluido y {name ? `tu cerebro externo (${name})` : "tu cerebro externo"}{" "}
-            contestan los mismos mensajes: apaga el agente incluido con el interruptor
-            de arriba o quita <Env>OPENROUTER_API_TOKEN</Env> del CRM.
+        {status.warning === "sin_cerebro" && (
+          <Callout tone="info" icon={Info} title="Sin agente conectado">
+            Vocero funciona como bandeja manual: tus clientes reciben lo que
+            contestes tú. Para que un agente conteste, levántalo al lado del CRM
+            y pon <Env>BRAIN_DISPATCH_URL</Env> y <Env>BOT_API_KEY</Env> en el
+            entorno.{" "}
+            <a
+              href={GUIA_DEL_PAR_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-0.5 whitespace-nowrap font-medium text-brand-text underline underline-offset-2 hover:text-brand"
+            >
+              Cómo conectarlo
+              <ArrowUpRight aria-hidden className="h-3.5 w-3.5" strokeWidth={1.8} />
+            </a>
           </Callout>
         )}
-        {status.warning === "sin_cerebro" && (
-          <Callout tone="warning" icon={Info} title="Nadie contesta en automático">
-            Tus clientes solo reciben lo que respondas desde la bandeja: enciende el
-            agente incluido (necesita <Env>OPENROUTER_API_TOKEN</Env>) o conecta tu
-            cerebro externo con <Env>BOT_API_KEY</Env>.
+        {status.warning === "apagado" && (
+          <Callout tone="warning" icon={AlertTriangle} title="Tu agente está conectado pero apagado">
+            Enciéndelo con el interruptor de arriba para que conteste. Mientras
+            tanto nadie contesta en automático: los mensajes esperan en la
+            bandeja.
           </Callout>
         )}
 
         <dl className="divide-y rounded-md border">
           <BrainRow
-            id="embedded"
-            icon={Sparkles}
-            label="Agente incluido"
-            hint="El de Vocero, con el comportamiento de esta página."
-            view={embeddedView(status)}
-          />
-          <BrainRow
             id="external"
             icon={Cable}
-            label="Cerebro externo"
-            hint="Tu propio bot (Nea u otro) por la API del CRM."
+            label="Tu agente"
+            hint="El cerebro que contesta (Nea u otro), por la API del CRM."
             view={externalView(status, now)}
+          />
+          {(status.dispatch.host !== null || status.dispatch.problem !== null) && (
+            <BrainRow
+              id="dispatch"
+              icon={Send}
+              label="Despacho al agente"
+              hint="El CRM le pasa cada turno; el webhook no sale de aquí."
+              view={dispatchView(status.dispatch, now)}
+            />
+          )}
+          <BrainRow
+            id="switch"
+            icon={Power}
+            label="Interruptor del agente"
+            hint="Encendido, el CRM le despacha los mensajes a tu agente."
+            view={switchView(status)}
           />
         </dl>
 
         {lastSeenAt && (
           <p className="text-[11px] text-text-3">
-            La última llamada del cerebro externo se cuenta desde el último arranque
-            del CRM.
+            La última llamada de tu agente se cuenta desde el último arranque del
+            CRM.
           </p>
         )}
       </CardContent>
@@ -90,34 +116,22 @@ export function BrainStatusCard({
   );
 }
 
-function embeddedView(s: BrainStatusDto): RowView {
-  const { configured, enabled, answering } = s.embedded;
-  const headline = `${enabled ? "Encendido" : "Apagado"} · ${
-    configured ? "token de IA: sí" : "sin token de IA"
-  }`;
-  if (enabled && !configured) {
-    return { tone: "warn", headline, detail: "No contesta: a la instancia le falta OPENROUTER_API_TOKEN." };
-  }
-  if (answering) {
+function switchView(s: BrainStatusDto): RowView {
+  const headline = s.enabled ? "Encendido" : "Apagado";
+  if (!s.dispatch.active) {
     return {
-      tone: "ok",
+      tone: "off",
       headline,
-      detail:
-        s.warning === "doble_respuesta"
-          ? null
-          : "Contesta en las conversaciones con la IA activada.",
+      detail: "Sin agente conectado no hay a quién despacharle: se enciende cuando lo conectes.",
     };
   }
-  if (s.external.active) {
-    return { tone: "off", headline, detail: "Así debe quedarse mientras conteste tu cerebro externo." };
+  if (!s.enabled) {
+    return { tone: "warn", headline, detail: "El CRM no le pasa nada a tu agente: nadie contesta en automático." };
   }
-  return {
-    tone: "off",
-    headline,
-    detail: configured
-      ? "Enciéndelo con el interruptor de arriba para que conteste."
-      : "Para usarlo, agrega OPENROUTER_API_TOKEN a la instancia y reiníciala.",
-  };
+  if (externalDown(s)) {
+    return { tone: "warn", headline, detail: "Pero tu agente no está en línea: no contesta hasta que vuelva." };
+  }
+  return { tone: "ok", headline, detail: "El CRM le pasa cada mensaje a tu agente." };
 }
 
 function externalView(s: BrainStatusDto, now: number): RowView {
@@ -165,7 +179,43 @@ function externalView(s: BrainStatusDto, now: number): RowView {
   if (keyConfigured) {
     return { tone: active ? "ok" : "off", headline: `Llave configurada · ${llamada}`, detail: null };
   }
-  return { tone: "off", headline: "Sin cerebro externo", detail: null };
+  return { tone: "off", headline: "Sin agente conectado", detail: null };
+}
+
+function dispatchView(d: BrainDispatchDto, now: number): RowView {
+  const mientras = "Mientras tanto nadie contesta en automático.";
+  if (d.problem === "url") {
+    return {
+      tone: "warn",
+      headline: "No se puede despachar",
+      detail: `BRAIN_DISPATCH_URL no es una URL http:// o https:// válida, o lleva usuario y clave (p. ej. http://nea:8000/vocero/dispatch): corrígela y vuelve a desplegar el CRM. ${mientras}`,
+    };
+  }
+  if (d.problem === "sin_llave") {
+    return {
+      tone: "warn",
+      headline: "No se puede despachar",
+      detail: `Falta BOT_API_KEY (mínimo 16 caracteres): con ella se firma cada turno y contesta el cerebro. ${mientras}`,
+    };
+  }
+  const espera =
+    d.pending > 0
+      ? ` ${d.pending === 1 ? "1 turno en espera" : `${d.pending} turnos en espera`}.`
+      : "";
+  if (d.lastFailure && despachoFallando(d)) {
+    return {
+      tone: "warn",
+      headline: `Activo · ${d.host} · el último turno no llegó`,
+      detail: `${capitalize(d.lastFailure.detail)} (${haceCuanto(d.lastFailure.at, now)}). Tras tres intentos fallidos, la conversación queda con una persona.${espera}`,
+    };
+  }
+  return {
+    tone: "ok",
+    headline: `Activo · ${d.host}`,
+    detail: d.lastDeliveredAt
+      ? `Último turno entregado ${haceCuanto(d.lastDeliveredAt, now)}.${espera}`
+      : `Aún no se ha despachado ningún turno.${espera}`,
+  };
 }
 
 function versionLabel(v: string): string {
@@ -245,25 +295,32 @@ function Callout({
   title,
   children,
 }: {
-  tone: "danger" | "warning";
+  tone: "info" | "warning";
   icon: LucideIcon;
   title: string;
   children: React.ReactNode;
 }) {
   return (
     <div
-      role={tone === "danger" ? "alert" : "status"}
+      role="status"
+      data-callout={tone}
       className={cn(
         "flex items-start gap-2.5 rounded-md border p-3",
-        tone === "danger"
-          ? "border-danger-soft bg-danger-tint text-danger-text"
+        // Informativo en gris: una bandeja manual es un producto válido, no
+        // un error que haya que corregir.
+        tone === "info"
+          ? "bg-subtle text-foreground"
           : "border-warning-soft bg-warning-tint text-warning-text"
       )}
     >
-      <Icon aria-hidden className="mt-0.5 h-4 w-4 shrink-0" strokeWidth={1.8} />
+      <Icon
+        aria-hidden
+        className={cn("mt-0.5 h-4 w-4 shrink-0", tone === "info" && "text-text-3")}
+        strokeWidth={1.8}
+      />
       <div className="min-w-0 text-sm">
         <p className="font-semibold">{title}</p>
-        <p className="mt-0.5 leading-relaxed">{children}</p>
+        <p className={cn("mt-0.5 leading-relaxed", tone === "info" && "text-text-2")}>{children}</p>
       </div>
     </div>
   );

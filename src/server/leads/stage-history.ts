@@ -10,8 +10,8 @@ import { reportStageChange } from "@/server/attribution/conversions";
  *
  * Regla dura: mover un lead y registrar el movimiento son
  * la misma operación, en la misma transacción. Hoy hay cuatro caminos que
- * cambian de etapa (el dueño arrastra, el bot avanza, el agente in-process, la
- * reubicación al borrar una etapa); si cada uno copiara el "anota el evento",
+ * cambian de etapa (el dueño arrastra, la agenda avanza al reservar, el cerebro
+ * por `POST /api/bot/stage`, la reubicación al borrar una etapa); si cada uno copiara el "anota el evento",
  * el quinto que alguien agregue lo olvidaría. Y olvidarlo NO truena: solo hace
  * que las gráficas mientan meses después.
  *
