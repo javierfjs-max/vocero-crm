@@ -39,6 +39,8 @@ describe("055 — combinaciones", () => {
     expect(atajoBandeja(tecla({ key: "k", code: "KeyK", altKey: true }))).toBe("anterior");
     expect(atajoBandeja(tecla({ key: "r", code: "KeyR", altKey: true }))).toBe("responder");
     expect(atajoBandeja(tecla({ key: "n", code: "KeyN", altKey: true }))).toBe("nota");
+    // f01 — Option+A en Mac escribe «å»: cuenta la tecla física.
+    expect(atajoBandeja(tecla({ key: "å", code: "KeyA", altKey: true }))).toBe("asistente");
     expect(atajoBandeja(tecla({ key: "/", code: "Slash" }))).toBe("buscar");
     expect(atajoBandeja(tecla({ key: "j", code: "KeyJ" }))).toBeNull();
     expect(atajoBandeja(tecla({ key: "j", code: "KeyJ", altKey: true, ctrlKey: true }))).toBeNull();
@@ -51,7 +53,7 @@ describe("055 — combinaciones", () => {
   });
 
   it("la ayuda lista cada atajo que existe", () => {
-    expect(ATAJOS.map((a) => a.teclas.join("+"))).toEqual(["Ctrl+K", "?", "Alt+J", "Alt+K", "/", "Alt+R", "Alt+N"]);
+    expect(ATAJOS.map((a) => a.teclas.join("+"))).toEqual(["Ctrl+K", "?", "Alt+J", "Alt+K", "/", "Alt+R", "Alt+N", "Alt+A"]);
   });
 });
 

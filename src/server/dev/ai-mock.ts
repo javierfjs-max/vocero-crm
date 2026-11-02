@@ -1,4 +1,5 @@
 import { JUDGE_MARKER } from "@/server/ai/prompts";
+import { ASISTENTE_MARKER } from "@/server/asistente/marca";
 
 /**
  * Proveedor LLM determinista para el self-test (contrato mocks.md).
@@ -73,7 +74,13 @@ export function aiMockEstado(params: URLSearchParams): EstadoIa {
  * anota ni se demora: lo que se observa es la charla con el cliente.
  */
 export async function aiMockRegistrar(messages: InMessage[]): Promise<void> {
-  if (messages.some((m) => m.role === "system" && m.content.includes(JUDGE_MARKER))) {
+  if (
+    messages.some(
+      (m) =>
+        m.role === "system" &&
+        (m.content.includes(JUDGE_MARKER) || m.content.includes(ASISTENTE_MARKER))
+    )
+  ) {
     return;
   }
   const e = estadoIa();
@@ -118,6 +125,37 @@ export function aiMockCompletion(messages: InMessage[]): string {
       });
     }
     return JSON.stringify({ veredicto: "verde", hallazgos: [] });
+  }
+
+  // f01 — Asistente del asesor: devuelve el borrador con su modo delante, así
+  // el guion ve qué acción llegó. `falla_proveedor` en el borrador responde
+  // algo que no es JSON en todos los intentos: el camino infeliz.
+  // Las sugerencias (fases 2 y 3) responden con la forma de su modo; la
+  // plantilla elegida es la primera de la lista que le llegó.
+  if (system.includes(ASISTENTE_MARKER)) {
+    if (lastUser.includes("falla_proveedor")) return "lo siento, no puedo";
+    const modo = system.split(ASISTENTE_MARKER)[1]?.split("]")[0] ?? "?";
+    if (modo === "respuesta" || modo === "seguimiento") {
+      return JSON.stringify({
+        sugerencias: [
+          { enfoque: "Directo", texto: `[${modo}] Claro, con gusto te ayudo.` },
+          { enfoque: "Con pregunta", texto: `[${modo}] ¿Te comparto el [precio] y la disponibilidad?` },
+        ],
+      });
+    }
+    if (modo === "tecnica") {
+      return JSON.stringify({
+        momento: "Listo para decidir",
+        tecnica: "cierre_alternativa",
+        porque: "[tecnica] El cliente ya mostró interés.",
+        ejemplo: "¿Te queda mejor el martes o el jueves?",
+      });
+    }
+    if (modo === "plantilla") {
+      const nombre = lastUser.split("PLANTILLA: ")[1]?.split(" — ")[0] ?? "";
+      return JSON.stringify({ plantilla: nombre, porque: "[plantilla] Retoma la conversación." });
+    }
+    return JSON.stringify({ text: `[${modo}] ${lastUser}` });
   }
 
   // 036 — Lo demás es un cerebro pensando por `/api/bot/llm`: texto de eco,

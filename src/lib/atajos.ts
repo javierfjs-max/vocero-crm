@@ -21,6 +21,7 @@ export const ATAJOS: { teclas: string[]; que: string; donde: "Cualquier pantalla
   { teclas: ["/"], que: "Ir al buscador de la Bandeja", donde: "Bandeja" },
   { teclas: ["Alt", "R"], que: "Escribir una respuesta", donde: "Bandeja" },
   { teclas: ["Alt", "N"], que: "Escribir una nota interna", donde: "Bandeja" },
+  { teclas: ["Alt", "A"], que: "Abrir el asistente de redacción", donde: "Bandeja" },
 ];
 
 /** D4 — Un campo donde se escribe: ahí «?» y «/» son letras, no atajos. */
@@ -41,7 +42,7 @@ export function esAyuda(e: Tecla): boolean {
   return e.key === "?" && !e.ctrlKey && !e.metaKey && !e.altKey;
 }
 
-export type AtajoBandeja = "siguiente" | "anterior" | "buscar" | "responder" | "nota";
+export type AtajoBandeja = "siguiente" | "anterior" | "buscar" | "responder" | "nota" | "asistente";
 
 /**
  * D3 — El atajo de la Bandeja de esta tecla, o null. Con Alt se mira la tecla
@@ -58,6 +59,9 @@ export function atajoBandeja(e: Tecla): AtajoBandeja | null {
         return "responder";
       case "KeyN":
         return "nota";
+      // f01 — El asistente de redacción del compositor.
+      case "KeyA":
+        return "asistente";
       default:
         return null;
     }
