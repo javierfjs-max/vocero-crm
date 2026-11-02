@@ -3,13 +3,14 @@ import { PeticionSugerencia, sugerir } from "@/server/asistente/sugerencias";
 
 export const dynamic = "force-dynamic";
 
+/** Estado, código público (el mismo que la ruta de redacción) y mensaje. */
 const CODIGOS = {
-  not_found: [404, "Conversación no encontrada."],
-  sin_mensajes: [409, "El cliente todavía no ha escrito nada: no hay a qué responder."],
-  ventana_cerrada: [409, "La ventana para escribir está cerrada: no se puede enviar texto libre."],
-  sin_plantillas: [409, "La ventana está cerrada y no hay plantillas aprobadas para retomar la conversación."],
-  not_configured: [503, "La IA no está configurada (Ajustes → IA)."],
-  unavailable: [503, "La IA no respondió. Vuelve a intentarlo."],
+  not_found: [404, "not_found", "Conversación no encontrada."],
+  sin_mensajes: [409, "sin_mensajes", "El cliente todavía no ha escrito nada: no hay a qué responder."],
+  ventana_cerrada: [409, "ventana_cerrada", "La ventana para escribir está cerrada: no se puede enviar texto libre."],
+  sin_plantillas: [409, "sin_plantillas", "La ventana está cerrada y no hay plantillas aprobadas para retomar la conversación."],
+  not_configured: [503, "ai_not_configured", "La IA no está configurada (Ajustes → IA)."],
+  unavailable: [503, "ai_unavailable", "La IA no respondió. Vuelve a intentarlo."],
 } as const;
 
 /**
@@ -35,6 +36,6 @@ export const POST = withAuth(async (session, req: Request) => {
   if (result.error === "unavailable") {
     console.error(`[asistente] fallo del proveedor: ${result.detail}`);
   }
-  const [status, mensaje] = CODIGOS[result.error];
-  return apiError(status, result.error, mensaje);
+  const [status, codigo, mensaje] = CODIGOS[result.error];
+  return apiError(status, codigo, mensaje);
 });

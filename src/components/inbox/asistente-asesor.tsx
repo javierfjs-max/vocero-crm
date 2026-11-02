@@ -181,7 +181,8 @@ export function AsistenteAsesor({
         const borrador = texto;
         const r = await pedir<{ text: string }>("/api/inbox/asistente", { ...o.cuerpo, borrador });
         if (!r.ok) {
-          onError(`${r.mensaje} Tu texto quedó intacto.`);
+          // El 503 del servidor ya lo dice; un fallo de red o un 422, no.
+          onError(/intacto/.test(r.mensaje) ? r.mensaje : `${r.mensaje} Tu texto quedó intacto.`);
           return;
         }
         if (textoActual.current !== borrador) {

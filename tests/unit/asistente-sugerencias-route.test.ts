@@ -64,18 +64,19 @@ describe("f01 — POST /api/inbox/asistente/sugerencias", () => {
   });
 
   it.each([
-    ["not_found", 404],
-    ["sin_mensajes", 409],
-    ["ventana_cerrada", 409],
-    ["sin_plantillas", 409],
-    ["not_configured", 503],
-    ["unavailable", 503],
-  ] as const)("%s responde %i con su código", async (error, status) => {
+    ["not_found", 404, "not_found"],
+    ["sin_mensajes", 409, "sin_mensajes"],
+    ["ventana_cerrada", 409, "ventana_cerrada"],
+    ["sin_plantillas", 409, "sin_plantillas"],
+    // Los de la IA, con el mismo código que la ruta de redacción.
+    ["not_configured", 503, "ai_not_configured"],
+    ["unavailable", 503, "ai_unavailable"],
+  ] as const)("%s responde %i con el código %s", async (error, status, codigo) => {
     mocks.sugerir.mockResolvedValue({ ok: false, error, detail: "x" });
     const res = await pedir(valida);
     expect(res.status).toBe(status);
     const body = await res.json();
-    expect(body.error.code).toBe(error);
+    expect(body.error.code).toBe(codigo);
     expect(body.error.message.length).toBeGreaterThan(0);
   });
 });
