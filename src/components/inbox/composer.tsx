@@ -36,7 +36,7 @@ import { EmojiPicker } from "./emoji-picker";
 import { insertAtSelection } from "@/lib/emojis";
 import { VoiceRecorder, type NotaGrabada } from "./voice-recorder";
 import { QuickReplyMenu } from "./quick-reply-menu";
-import { AsistenteRedaccion } from "./asistente-redaccion";
+import { AsistenteAsesor, RecomendarPlantilla } from "./asistente-asesor";
 import { guardarBorrador, leerBorrador } from "@/lib/borradores";
 import {
   aplicarRespuesta,
@@ -620,6 +620,7 @@ export function Composer({
             </p>
           </div>
         </div>
+        <RecomendarPlantilla conversationId={conversation.id} />
         <TemplateSender conversationId={conversation.id} onSent={onSent} />
       </div>,
       true
@@ -759,7 +760,8 @@ export function Composer({
           />
         )}
         <EmojiPicker disabled={sending} onSelect={insertEmoji} />
-        <AsistenteRedaccion
+        <AsistenteAsesor
+          conversationId={conversation.id}
           texto={text}
           disabled={sending}
           onAplicar={(propuesta) => {
