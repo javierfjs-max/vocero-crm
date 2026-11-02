@@ -3,6 +3,7 @@
 import { atajoBandeja } from "@/lib/atajos";
 import { hayDialogoAbierto } from "@/components/atajos-globales";
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -35,6 +36,7 @@ import { EmojiPicker } from "./emoji-picker";
 import { insertAtSelection } from "@/lib/emojis";
 import { VoiceRecorder, type NotaGrabada } from "./voice-recorder";
 import { QuickReplyMenu } from "./quick-reply-menu";
+import { AsistenteRedaccion } from "./asistente-redaccion";
 import { guardarBorrador, leerBorrador } from "@/lib/borradores";
 import {
   aplicarRespuesta,
@@ -96,6 +98,9 @@ export function Composer({
   const [token, setToken] = useState<{ inicio: number; consulta: string } | null>(null);
   const [activa, setActiva] = useState(0);
   const [cerradoEn, setCerradoEn] = useState<number | null>(null);
+  // f01 — El borrador antes de la propuesta del asistente: mientras exista se
+  // ofrece deshacer. Se descarta al volver a escribir o al enviar.
+  const [previoAsistente, setPrevioAsistente] = useState<string | null>(null);
   // 050 — Responder al cliente o anotar para el equipo.
   const [modo, setModo] = useState<"responder" | "nota">("responder");
   const notaRef = useRef<HTMLTextAreaElement>(null);
@@ -211,6 +216,9 @@ export function Composer({
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
   }
+
+  // f01 — Estable: el asistente lo usa como dependencia de su efecto.
+  const enfocarCaja = useCallback(() => taRef.current?.focus(), []);
 
   /** 049 — Relee el `/atajo` que hay antes del cursor (al teclear, hacer clic o moverse). */
   function releerToken() {
@@ -368,6 +376,7 @@ export function Composer({
 
   async function submit() {
     setError(null);
+    setPrevioAsistente(null);
 
     if (file) {
       // El adjunto sí espera: sube el archivo y no tiene sentido encolar otro
@@ -750,6 +759,17 @@ export function Composer({
           />
         )}
         <EmojiPicker disabled={sending} onSelect={insertEmoji} />
+        <AsistenteRedaccion
+          texto={text}
+          disabled={sending}
+          onAplicar={(propuesta) => {
+            setPrevioAsistente(text);
+            setText(propuesta);
+            requestAnimationFrame(autogrow);
+          }}
+          onError={setError}
+          onCerrar={enfocarCaja}
+        />
         {/* 028: solo lo que el canal puede mandar; en las redes, la caja sola.
             045: ubicación y contacto ya no se ofrecen (el servidor los sigue
             sabiendo enviar, para un cerebro conectado). */}
@@ -784,6 +804,7 @@ export function Composer({
           }}
           onChange={(e) => {
             setText(e.target.value);
+            setPrevioAsistente(null);
             autogrow();
             releerToken();
           }}
@@ -857,6 +878,19 @@ export function Composer({
           <p role="alert" className="text-xs text-destructive">
             {error}
           </p>
+        ) : previoAsistente !== null ? (
+          <button
+            type="button"
+            onClick={() => {
+              setText(previoAsistente);
+              setPrevioAsistente(null);
+              requestAnimationFrame(autogrow);
+              enfocarCaja();
+            }}
+            className="text-[11px] text-text-3 underline underline-offset-2 transition-colors hover:text-foreground"
+          >
+            Deshacer cambio del asistente
+          </button>
         ) : (
           <span />
         )}
